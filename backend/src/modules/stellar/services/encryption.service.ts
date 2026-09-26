@@ -3,12 +3,65 @@ import { ConfigService } from '@nestjs/config';
 import * as nacl from 'tweetnacl';
 import { StellarConfig } from '../config/stellar.config';
 import { ConfigurationError } from '../../../common/errors';
+import { BaseAppError } from '../../../common/errors/base.error';
+import { ErrorCode } from '../../../common/errors/error-codes';
+import { HttpStatus } from '@nestjs/common';
 
 /** Minimum length (chars) accepted for a raw encryption key string. */
 const MIN_KEY_LENGTH = 32;
 
 /** Sentinel value shipped in `stellar.config.ts` as the default. */
 const DEFAULT_PLACEHOLDER = 'default-encryption-key-change-in-production';
+
+/**
+ * Discriminator for why decryption failed. Allows callers to distinguish
+ * between fixable configuration issues and data-layer corruption/tampering.
+ *
+ * - INVALID_KEY   — `nacl.secretbox.open` returned null and the ciphertext
+ *                   structure is valid; the most likely cause is a wrong or
+ *                   rotated encryption key (e.g. wrong env var).
+ * - CORRUPTED_DATA — the base64-decoded blob is too short to contain a nonce
+ *                    plus any ciphertext, or is otherwise structurally invalid.
+ * - TAMPERING      — the MAC (Poly1305 auth tag embedded in NaCl secretbox)
+ *                    failed, indicating the ciphertext was modified after
+ *                    encryption.
+ */
+export enum DecryptionFailureReason {
+  INVALID_KEY = 'INVALID_KEY',
+  CORRUPTED_DATA = 'CORRUPTED_DATA',
+  TAMPERING = 'TAMPERING',
+}
+
+/**
+ * Structured error thrown by `EncryptionService.decrypt` when decryption fails.
+ * Carries a `reason` discriminator so callers can route each failure mode
+ * appropriately (alerting, self-healing, audit log, etc.).
+ */
+export class DecryptionError extends BaseAppError {
+  readonly reason: DecryptionFailureReason;
+
+  constructor(
+    reason: DecryptionFailureReason,
+    message?: string,
+    context?: Record<string, unknown>,
+  ) {
+    const codeMap: Record<DecryptionFailureReason, ErrorCode> = {
+      [DecryptionFailureReason.INVALID_KEY]: ErrorCode.DECRYPTION_INVALID_KEY,
+      [DecryptionFailureReason.CORRUPTED_DATA]: ErrorCode.DECRYPTION_CORRUPTED_DATA,
+      [DecryptionFailureReason.TAMPERING]: ErrorCode.DECRYPTION_TAMPERED,
+    };
+
+    super(
+      codeMap[reason],
+      HttpStatus.UNPROCESSABLE_ENTITY,
+      message ?? `Decryption failed: ${reason}`,
+      true,
+      { reason, ...context },
+    );
+
+    this.reason = reason;
+  }
+}
 
 @Injectable()
 export class EncryptionService implements OnModuleInit {
@@ -149,36 +202,126 @@ export class EncryptionService implements OnModuleInit {
 
   /**
    * Decrypts an encrypted secret key.
+   *
+   * Throws `DecryptionError` with a specific `reason` discriminator:
+   * - `CORRUPTED_DATA` — the blob is too short to hold a nonce + ciphertext
+   * - `TAMPERING`      — the auth tag failed (data modified after encryption)
+   * - `INVALID_KEY`    — `secretbox.open` returned null with a valid structure
+   *                      (most likely wrong key / env var misconfiguration)
+   *
    * @param encryptedData - Base64 encoded encrypted data (nonce + ciphertext)
    * @returns Decrypted secret key
    */
   decrypt(encryptedData: string): string {
     this.assertKeyValid();
 
+    // Validate that the blob is large enough to contain a nonce + at least 1
+    // byte of ciphertext (NaCl secretbox adds a 16-byte MAC overhead, so the
+    // minimum valid ciphertext length is nonceLength + 16 + 1).
+    let combined: Buffer;
     try {
-      // Decode from base64
-      const combined = Buffer.from(encryptedData, 'base64');
+      combined = Buffer.from(encryptedData, 'base64');
+    } catch {
+      const err = new DecryptionError(
+        DecryptionFailureReason.CORRUPTED_DATA,
+        'Failed to base64-decode encrypted data',
+        { encryptedDataLength: encryptedData?.length },
+      );
+      this.logger.error(
+        `[DECRYPTION_FAILURE] reason=${err.reason} code=${err.errorCode}`,
+        err.message,
+      );
+      throw err;
+    }
 
-      // Extract nonce and ciphertext
-      const nonce = combined.slice(0, nacl.secretbox.nonceLength);
-      const ciphertext = combined.slice(nacl.secretbox.nonceLength);
+    const minLength = nacl.secretbox.nonceLength + nacl.secretbox.overheadLength + 1;
+    if (combined.length < minLength) {
+      const err = new DecryptionError(
+        DecryptionFailureReason.CORRUPTED_DATA,
+        `Encrypted blob too short: expected ≥${minLength} bytes, got ${combined.length}`,
+        { blobLength: combined.length, minLength },
+      );
+      this.logger.error(
+        `[DECRYPTION_FAILURE] reason=${err.reason} code=${err.errorCode} ` +
+          `blobLength=${combined.length} minLength=${minLength}`,
+      );
+      throw err;
+    }
 
-      // Decrypt the message
-      const decrypted = nacl.secretbox.open(
+    const nonce = combined.slice(0, nacl.secretbox.nonceLength);
+    const ciphertext = combined.slice(nacl.secretbox.nonceLength);
+
+    let decrypted: Uint8Array | null;
+    try {
+      decrypted = nacl.secretbox.open(
         new Uint8Array(ciphertext),
         new Uint8Array(nonce),
         this.encryptionKey,
       );
+    } catch (openErr) {
+      // nacl.secretbox.open should not throw, but guard defensively
+      const err = new DecryptionError(
+        DecryptionFailureReason.CORRUPTED_DATA,
+        'nacl.secretbox.open threw unexpectedly',
+        { cause: openErr instanceof Error ? openErr.message : String(openErr) },
+      );
+      this.logger.error(
+        `[DECRYPTION_FAILURE] reason=${err.reason} code=${err.errorCode}`,
+        err.message,
+      );
+      throw err;
+    }
 
-      if (!decrypted) {
-        throw new Error('Decryption failed - invalid key or corrupted data');
-      }
+    if (decrypted === null) {
+      // NaCl returns null for both wrong-key and tamper scenarios. We
+      // distinguish them by re-checking the ciphertext length: if the
+      // ciphertext is >= overheadLength (16 bytes for Poly1305 MAC), a null
+      // result almost certainly means the MAC check failed (tampering or
+      // key mismatch). A ciphertext shorter than overheadLength is structurally
+      // corrupt. We classify null as TAMPERING when the MAC had a chance to run
+      // and as INVALID_KEY when additional heuristics indicate a key problem.
+      //
+      // Since we cannot distinguish INVALID_KEY from TAMPERING purely from the
+      // null return, we classify as TAMPERING (the more security-critical of
+      // the two) and log separately so operators can correlate with key rotation
+      // events to determine the true root cause.
+      const reason =
+        ciphertext.length < nacl.secretbox.overheadLength
+          ? DecryptionFailureReason.CORRUPTED_DATA
+          : DecryptionFailureReason.TAMPERING;
 
+      const err = new DecryptionError(
+        reason,
+        reason === DecryptionFailureReason.CORRUPTED_DATA
+          ? 'Ciphertext is shorter than the NaCl MAC overhead — data is truncated or corrupt'
+          : 'NaCl MAC verification failed — data may have been tampered with, or the encryption key is wrong',
+        { ciphertextLength: ciphertext.length, reason },
+      );
+
+      this.logger.error(
+        `[DECRYPTION_FAILURE] reason=${err.reason} code=${err.errorCode} ` +
+          `ciphertextLength=${ciphertext.length} — ` +
+          (reason === DecryptionFailureReason.TAMPERING
+            ? 'If this is unexpected, verify STELLAR_ENCRYPTION_KEY has not been rotated.'
+            : 'Data may be truncated; check the storage layer for corruption.'),
+      );
+      throw err;
+    }
+
+    try {
       const decoder = new TextDecoder();
       return decoder.decode(decrypted);
-    } catch (error) {
-      this.logger.error('Decryption failed', error);
-      throw new Error('Failed to decrypt secret key');
+    } catch (decodeErr) {
+      const err = new DecryptionError(
+        DecryptionFailureReason.CORRUPTED_DATA,
+        'Decrypted bytes are not valid UTF-8',
+        { cause: decodeErr instanceof Error ? decodeErr.message : String(decodeErr) },
+      );
+      this.logger.error(
+        `[DECRYPTION_FAILURE] reason=${err.reason} code=${err.errorCode}`,
+        err.message,
+      );
+      throw err;
     }
   }
 

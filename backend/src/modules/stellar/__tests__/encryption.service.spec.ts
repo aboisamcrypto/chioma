@@ -1,99 +1,211 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
-import { EncryptionService } from '../services/encryption.service';
+import {
+  EncryptionService,
+  DecryptionError,
+  DecryptionFailureReason,
+} from '../services/encryption.service';
+import * as nacl from 'tweetnacl';
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+const VALID_KEY = 'test-encryption-key-for-testing-purposes-abcdef';
+
+function buildModule(keyOverride?: string): Promise<TestingModule> {
+  return Test.createTestingModule({
+    providers: [
+      EncryptionService,
+      {
+        provide: ConfigService,
+        useValue: {
+          get: jest.fn().mockReturnValue({
+            encryptionKey: keyOverride ?? VALID_KEY,
+          }),
+        },
+      },
+    ],
+  }).compile();
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('EncryptionService', () => {
   let service: EncryptionService;
 
-  const mockConfigService = {
-    get: jest.fn().mockReturnValue({
-      encryptionKey: 'test-encryption-key-for-testing-purposes',
-    }),
-  };
-
   beforeEach(async () => {
-    const module: TestingModule = await Test.createTestingModule({
-      providers: [
-        EncryptionService,
-        {
-          provide: ConfigService,
-          useValue: mockConfigService,
-        },
-      ],
-    }).compile();
-
+    const module = await buildModule();
     service = module.get<EncryptionService>(EncryptionService);
   });
 
-  describe('encrypt and decrypt', () => {
-    it('should encrypt and decrypt a secret key correctly', () => {
-      const originalSecret =
-        'SABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUV';
+  // ── round-trip ─────────────────────────────────────────────────────────────
 
-      const encrypted = service.encrypt(originalSecret);
-      expect(encrypted).toBeDefined();
-      expect(encrypted).not.toBe(originalSecret);
-
-      const decrypted = service.decrypt(encrypted);
-      expect(decrypted).toBe(originalSecret);
-    });
-
-    it('should produce different ciphertext for same plaintext (due to random nonce)', () => {
+  describe('encrypt / decrypt round-trip', () => {
+    it('encrypts and decrypts a Stellar secret key', () => {
       const secret = 'SABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUV';
-
-      const encrypted1 = service.encrypt(secret);
-      const encrypted2 = service.encrypt(secret);
-
-      expect(encrypted1).not.toBe(encrypted2);
-
-      // But both should decrypt to the same value
-      expect(service.decrypt(encrypted1)).toBe(secret);
-      expect(service.decrypt(encrypted2)).toBe(secret);
+      expect(service.decrypt(service.encrypt(secret))).toBe(secret);
     });
 
-    it('should throw an error for invalid encrypted data', () => {
-      expect(() => service.decrypt('invalid-base64-data')).toThrow();
+    it('produces different ciphertext for the same plaintext (random nonce)', () => {
+      const secret = 'same-secret';
+      const c1 = service.encrypt(secret);
+      const c2 = service.encrypt(secret);
+      expect(c1).not.toBe(c2);
+      expect(service.decrypt(c1)).toBe(secret);
+      expect(service.decrypt(c2)).toBe(secret);
     });
 
-    it('should handle empty strings', () => {
-      const encrypted = service.encrypt('');
-      const decrypted = service.decrypt(encrypted);
-      expect(decrypted).toBe('');
+    it('handles an empty string payload', () => {
+      expect(service.decrypt(service.encrypt(''))).toBe('');
     });
 
-    it('should handle special characters', () => {
-      const secretWithSpecialChars = 'secret!@#$%^&*()_+-=[]{}|;:,.<>?';
-
-      const encrypted = service.encrypt(secretWithSpecialChars);
-      const decrypted = service.decrypt(encrypted);
-
-      expect(decrypted).toBe(secretWithSpecialChars);
+    it('handles special characters', () => {
+      const s = 'secret!@#$%^&*()_+-=[]{}|;:,.<>?';
+      expect(service.decrypt(service.encrypt(s))).toBe(s);
     });
 
-    it('should handle unicode characters', () => {
-      const unicodeSecret = '秘密🔐';
-
-      const encrypted = service.encrypt(unicodeSecret);
-      const decrypted = service.decrypt(encrypted);
-
-      expect(decrypted).toBe(unicodeSecret);
+    it('handles unicode / emoji', () => {
+      const s = '秘密🔐';
+      expect(service.decrypt(service.encrypt(s))).toBe(s);
     });
   });
 
+  // ── DecryptionError — CORRUPTED_DATA ───────────────────────────────────────
+
+  describe('decrypt → DecryptionError(CORRUPTED_DATA)', () => {
+    it('throws CORRUPTED_DATA for a plain non-base64 string', () => {
+      // Buffer.from handles arbitrary strings without throwing, so the blob
+      // will just be short — trigger the length guard instead.
+      const err = (() => {
+        try {
+          service.decrypt('x');
+        } catch (e) {
+          return e;
+        }
+      })();
+      expect(err).toBeInstanceOf(DecryptionError);
+      expect((err as DecryptionError).reason).toBe(
+        DecryptionFailureReason.CORRUPTED_DATA,
+      );
+    });
+
+    it('throws CORRUPTED_DATA for a blob shorter than nonce + overhead + 1', () => {
+      // A valid blob must be >= nonceLength (24) + overheadLength (16) + 1 = 41 bytes.
+      // Encode 10 bytes — clearly too short.
+      const tooShort = Buffer.alloc(10).toString('base64');
+      expect(() => service.decrypt(tooShort)).toThrow(DecryptionError);
+      try {
+        service.decrypt(tooShort);
+      } catch (e) {
+        expect(e).toBeInstanceOf(DecryptionError);
+        expect((e as DecryptionError).reason).toBe(
+          DecryptionFailureReason.CORRUPTED_DATA,
+        );
+      }
+    });
+
+    it('throws CORRUPTED_DATA for an empty string input', () => {
+      try {
+        service.decrypt('');
+      } catch (e) {
+        expect(e).toBeInstanceOf(DecryptionError);
+        expect((e as DecryptionError).reason).toBe(
+          DecryptionFailureReason.CORRUPTED_DATA,
+        );
+      }
+    });
+  });
+
+  // ── DecryptionError — TAMPERING ────────────────────────────────────────────
+
+  describe('decrypt → DecryptionError(TAMPERING)', () => {
+    it('throws TAMPERING when the ciphertext byte is flipped', () => {
+      const encrypted = service.encrypt('tamper-me');
+      const blob = Buffer.from(encrypted, 'base64');
+      // Flip a byte in the ciphertext portion (after the 24-byte nonce)
+      blob[nacl.secretbox.nonceLength] ^= 0xff;
+      expect(() => service.decrypt(blob.toString('base64'))).toThrow(
+        DecryptionError,
+      );
+      try {
+        service.decrypt(blob.toString('base64'));
+      } catch (e) {
+        expect(e).toBeInstanceOf(DecryptionError);
+        expect((e as DecryptionError).reason).toBe(
+          DecryptionFailureReason.TAMPERING,
+        );
+      }
+    });
+
+    it('throws TAMPERING when the nonce byte is flipped', () => {
+      const encrypted = service.encrypt('nonce-tamper');
+      const blob = Buffer.from(encrypted, 'base64');
+      // Flip a byte in the nonce portion
+      blob[0] ^= 0xff;
+      try {
+        service.decrypt(blob.toString('base64'));
+      } catch (e) {
+        expect(e).toBeInstanceOf(DecryptionError);
+        expect((e as DecryptionError).reason).toBe(
+          DecryptionFailureReason.TAMPERING,
+        );
+      }
+    });
+
+    it('throws TAMPERING when decrypting with the wrong key', async () => {
+      const encrypted = service.encrypt('wrong-key-test');
+      const otherModule = await buildModule(
+        'completely-different-key-for-testing-xyz',
+      );
+      const otherService = otherModule.get<EncryptionService>(EncryptionService);
+      expect(() => otherService.decrypt(encrypted)).toThrow(DecryptionError);
+      try {
+        otherService.decrypt(encrypted);
+      } catch (e) {
+        expect(e).toBeInstanceOf(DecryptionError);
+        // Wrong key causes MAC failure — classified as TAMPERING
+        expect((e as DecryptionError).reason).toBe(
+          DecryptionFailureReason.TAMPERING,
+        );
+      }
+    });
+  });
+
+  // ── error class identity ───────────────────────────────────────────────────
+
+  describe('DecryptionError shape', () => {
+    it('is an instance of Error', () => {
+      try {
+        service.decrypt(Buffer.alloc(10).toString('base64'));
+      } catch (e) {
+        expect(e).toBeInstanceOf(Error);
+        expect(e).toBeInstanceOf(DecryptionError);
+      }
+    });
+
+    it('carries the reason on the error instance', () => {
+      try {
+        service.decrypt(Buffer.alloc(10).toString('base64'));
+      } catch (e) {
+        expect((e as DecryptionError).reason).toBeDefined();
+        expect(Object.values(DecryptionFailureReason)).toContain(
+          (e as DecryptionError).reason,
+        );
+      }
+    });
+
+    it('carries a meaningful message', () => {
+      try {
+        service.decrypt(Buffer.alloc(10).toString('base64'));
+      } catch (e) {
+        expect((e as Error).message).toContain('Decryption failed');
+      }
+    });
+  });
+
+  // ── isConfigured ───────────────────────────────────────────────────────────
+
   describe('isConfigured', () => {
-    it('should return true when properly configured', () => {
-      mockConfigService.get.mockReturnValue({
-        encryptionKey: 'properly-configured-key',
-      });
-
-      const _module = Test.createTestingModule({
-        providers: [
-          EncryptionService,
-          { provide: ConfigService, useValue: mockConfigService },
-        ],
-      });
-
-      // Service is configured in beforeEach, so this should work
+    it('returns true when properly configured', () => {
       expect(service.isConfigured()).toBe(true);
     });
   });
