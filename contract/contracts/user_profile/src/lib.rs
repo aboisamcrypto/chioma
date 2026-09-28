@@ -38,6 +38,9 @@ mod tests_events;
 #[cfg(test)]
 mod tests_storage;
 
+#[cfg(test)]
+mod tests_property;
+
 pub use errors::ContractError;
 pub use profile::*;
 pub use types::*;
