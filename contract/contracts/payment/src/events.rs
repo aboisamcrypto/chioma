@@ -123,6 +123,19 @@ pub struct PlatformFeeCollectorUpdated {
     pub updated_at: u64,
 }
 
+/// Event emitted whenever a platform fee is collected from a payment
+/// (#1563), carrying the running total so an off-chain indexer can audit
+/// cumulative fee revenue without separately querying contract storage.
+/// Topics: ["fees_accrued", agreement_id: String]
+#[contractevent(topics = ["fees_accrued"])]
+pub struct FeesAccrued {
+    #[topic]
+    pub agreement_id: String,
+    pub amount: i128,
+    pub total_fees_collected: i128,
+    pub accrued_at: u64,
+}
+
 /// Event emitted when the `chioma` contract address used for cross-contract
 /// agreement verification is updated (#1559)
 /// Topics: ["chioma_contract_updated", chioma_contract: Address]
@@ -318,6 +331,22 @@ pub(crate) fn rent_paid(
         landlord_amount,
         platform_amount,
         paid_at: env.ledger().timestamp(),
+    }
+    .publish(env);
+}
+
+/// Helper function to emit the fees-accrued event (#1563)
+pub(crate) fn fees_accrued(
+    env: &Env,
+    agreement_id: String,
+    amount: i128,
+    total_fees_collected: i128,
+) {
+    FeesAccrued {
+        agreement_id,
+        amount,
+        total_fees_collected,
+        accrued_at: env.ledger().timestamp(),
     }
     .publish(env);
 }

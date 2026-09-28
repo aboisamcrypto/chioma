@@ -1881,6 +1881,97 @@ fn test_release_rent_splits_90_5_5() {
     assert_eq!(token_client.balance(&client.address), 0);
 }
 
+/// The platform governance share (5% of each release) accrues into an
+/// on-chain running total across releases (#1563), rather than only being
+/// reconstructable after the fact from `RentReleased` event logs.
+#[test]
+fn test_release_rent_accrues_governance_fee_into_running_total() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (
+        client,
+        depositor,
+        beneficiary,
+        arbiter,
+        platform_governance,
+        agent_referral,
+        token_address,
+        agreement_id,
+        dispute_resolution_contract,
+    ) = setup_test_with_fees(&env);
+
+    assert_eq!(client.get_total_governance_fees(), 0);
+
+    let amount = 1000i128;
+    let escrow_id = client.create(
+        &depositor,
+        &beneficiary,
+        &arbiter,
+        &platform_governance,
+        &agent_referral,
+        &amount,
+        &token_address,
+        &agreement_id,
+        &dispute_resolution_contract,
+    );
+
+    let token_admin = TokenAdminClient::new(&env, &token_address);
+    token_admin.mint(&depositor, &amount);
+    client.fund_escrow(&escrow_id, &depositor);
+    client.release_rent(&escrow_id, &arbiter);
+
+    // 5% of 1000 = 50.
+    assert_eq!(client.get_total_governance_fees(), 50);
+}
+
+/// The running governance fee total accumulates across multiple escrows
+/// rather than being overwritten or scoped per escrow.
+#[test]
+fn test_release_rent_governance_fee_total_accumulates_across_escrows() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (
+        client,
+        depositor,
+        beneficiary,
+        arbiter,
+        platform_governance,
+        agent_referral,
+        token_address,
+        _agreement_id,
+        dispute_resolution_contract,
+    ) = setup_test_with_fees(&env);
+
+    let amount = 1000i128;
+    let token_admin = TokenAdminClient::new(&env, &token_address);
+    let agreement_ids = [
+        soroban_sdk::String::from_str(&env, "agr-fee-accum-1"),
+        soroban_sdk::String::from_str(&env, "agr-fee-accum-2"),
+    ];
+
+    for agreement_id in &agreement_ids {
+        let escrow_id = client.create(
+            &depositor,
+            &beneficiary,
+            &arbiter,
+            &platform_governance,
+            &agent_referral,
+            &amount,
+            &token_address,
+            agreement_id,
+            &dispute_resolution_contract,
+        );
+        token_admin.mint(&depositor, &amount);
+        client.fund_escrow(&escrow_id, &depositor);
+        client.release_rent(&escrow_id, &arbiter);
+    }
+
+    // Two releases of 1000 each, 5% governance fee each: 50 + 50 = 100.
+    assert_eq!(client.get_total_governance_fees(), 100);
+}
+
 #[test]
 fn test_release_rent_rounding_remainder_goes_to_agent() {
     let env = Env::default();

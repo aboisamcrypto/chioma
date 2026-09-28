@@ -406,3 +406,139 @@ fn set_chioma_contract_requires_admin() {
     assert_eq!(ok, Ok(Ok(())));
     assert_eq!(client.get_chioma_contract(), Some(chioma));
 }
+
+// ── Fee accounting (#1563) ──────────────────────────────────────────────────
+
+/// The platform fee (10% of each payment) accrues into an on-chain running
+/// total that grows by exactly the fee amount on every successful payment,
+/// rather than only being reconstructable after the fact from event logs.
+#[test]
+fn pay_rent_accrues_platform_fee_into_running_total() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, landlord, tenant, payment_token, chioma) = setup(&env);
+    let agreement_id = String::from_str(&env, "agr-fee-accrual");
+    let monthly_rent = 1_000i128;
+
+    let chioma_agreement = sample_chioma_agreement(
+        &env,
+        &agreement_id,
+        &landlord,
+        &tenant,
+        monthly_rent,
+        &payment_token,
+        ChiomaAgreementStatus::Active,
+    );
+    put_chioma_agreement(&env, &chioma, &chioma_agreement);
+    seed_local_agreement(
+        &env,
+        &client,
+        &agreement_id,
+        &landlord,
+        &tenant,
+        monthly_rent,
+        &payment_token,
+        AgreementStatus::Active,
+    );
+
+    let token_admin_client = TokenAdminClient::new(&env, &payment_token);
+    token_admin_client.mint(&tenant, &monthly_rent);
+
+    assert_eq!(client.get_total_fees_collected(), 0);
+
+    let result = client.try_pay_rent(&tenant, &agreement_id, &monthly_rent);
+    assert_eq!(result, Ok(Ok(())));
+
+    // 90/10 split: 100 of 1000 is the platform fee.
+    assert_eq!(client.get_total_fees_collected(), 100);
+}
+
+/// The running fee total accumulates across multiple agreements/payments
+/// rather than being overwritten or scoped per agreement.
+#[test]
+fn pay_rent_fee_total_accumulates_across_agreements() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, landlord, tenant, payment_token, chioma) = setup(&env);
+    let monthly_rent = 1_000i128;
+
+    let agreement_ids = [
+        String::from_str(&env, "agr-fee-accum-1"),
+        String::from_str(&env, "agr-fee-accum-2"),
+    ];
+
+    for agreement_id in &agreement_ids {
+        let chioma_agreement = sample_chioma_agreement(
+            &env,
+            agreement_id,
+            &landlord,
+            &tenant,
+            monthly_rent,
+            &payment_token,
+            ChiomaAgreementStatus::Active,
+        );
+        put_chioma_agreement(&env, &chioma, &chioma_agreement);
+        seed_local_agreement(
+            &env,
+            &client,
+            agreement_id,
+            &landlord,
+            &tenant,
+            monthly_rent,
+            &payment_token,
+            AgreementStatus::Active,
+        );
+
+        let token_admin_client = TokenAdminClient::new(&env, &payment_token);
+        token_admin_client.mint(&tenant, &monthly_rent);
+
+        let result = client.try_pay_rent(&tenant, agreement_id, &monthly_rent);
+        assert_eq!(result, Ok(Ok(())));
+    }
+
+    // Two payments of 1000 each, 10% fee each: 100 + 100 = 200.
+    assert_eq!(client.get_total_fees_collected(), 200);
+}
+
+/// A rejected payment (e.g. drifted agreement data) must not accrue any
+/// fee into the running total.
+#[test]
+fn pay_rent_rejected_payment_does_not_accrue_fee() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, landlord, tenant, payment_token, chioma) = setup(&env);
+    let agreement_id = String::from_str(&env, "agr-fee-rejected");
+    let monthly_rent = 1_000i128;
+    let real_tenant_on_chioma = Address::generate(&env);
+
+    let chioma_agreement = sample_chioma_agreement(
+        &env,
+        &agreement_id,
+        &landlord,
+        &real_tenant_on_chioma,
+        monthly_rent,
+        &payment_token,
+        ChiomaAgreementStatus::Active,
+    );
+    put_chioma_agreement(&env, &chioma, &chioma_agreement);
+    seed_local_agreement(
+        &env,
+        &client,
+        &agreement_id,
+        &landlord,
+        &tenant,
+        monthly_rent,
+        &payment_token,
+        AgreementStatus::Active,
+    );
+
+    let token_admin_client = TokenAdminClient::new(&env, &payment_token);
+    token_admin_client.mint(&tenant, &monthly_rent);
+
+    let result = client.try_pay_rent(&tenant, &agreement_id, &monthly_rent);
+    assert_eq!(result, Err(Ok(PaymentError::AgreementDataMismatch)));
+    assert_eq!(client.get_total_fees_collected(), 0);
+}

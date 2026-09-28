@@ -72,4 +72,9 @@ pub enum DataKey {
     /// cross-checks agreement data against before processing a payment
     /// (#1559). See `payment_impl::verify_agreement_with_chioma`.
     ChiomaContract,
+    /// Running total of platform fees collected across all payments
+    /// (#1563), so "how much fee revenue has been collected" has an
+    /// on-chain, queryable answer instead of only being reconstructable by
+    /// replaying every `RentPaid` event.
+    TotalFeesCollected,
 }

@@ -137,6 +137,20 @@ pub struct SafetyDepositWithdrawn {
     pub withdrawn_at: u64,
 }
 
+/// Event emitted whenever the platform governance fee is collected from a
+/// `release_rent` call (#1563), carrying the running total so an off-chain
+/// indexer can audit cumulative fee revenue without separately querying
+/// contract storage.
+/// Topics: ["governance_fees_accrued", escrow_id: BytesN<32>]
+#[contractevent(topics = ["governance_fees_accrued"])]
+pub struct GovernanceFeesAccrued {
+    #[topic]
+    pub escrow_id: BytesN<32>,
+    pub amount: i128,
+    pub total_governance_fees: i128,
+    pub accrued_at: u64,
+}
+
 /// Event emitted when a dispute times out
 /// Topics: ["dispute_timeout", escrow_id: BytesN<32>]
 #[contractevent(topics = ["dispute_timeout"])]
@@ -387,6 +401,22 @@ pub(crate) fn rent_released(
         platform_fee,
         agent_fee,
         released_at: env.ledger().timestamp(),
+    }
+    .publish(env);
+}
+
+/// Helper function to emit the governance-fees-accrued event (#1563)
+pub(crate) fn governance_fees_accrued(
+    env: &Env,
+    escrow_id: BytesN<32>,
+    amount: i128,
+    total_governance_fees: i128,
+) {
+    GovernanceFeesAccrued {
+        escrow_id,
+        amount,
+        total_governance_fees,
+        accrued_at: env.ledger().timestamp(),
     }
     .publish(env);
 }

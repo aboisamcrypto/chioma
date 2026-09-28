@@ -412,6 +412,23 @@ impl PaymentContract {
             .persistent()
             .set(&StorageKey::Agreement(agreement_id.clone()), &agreement);
 
+        // Running fee total (#1563): incremented as part of EFFECTS, before
+        // the token transfers below, so the on-chain accounting reflects
+        // "a fee was collected" atomically with the payment itself rather
+        // than only being reconstructable after the fact from event logs.
+        let total_fees_collected: i128 = env
+            .storage()
+            .instance()
+            .get(&StorageKey::TotalFeesCollected)
+            .unwrap_or(0i128)
+            + platform_amount;
+        env.storage()
+            .instance()
+            .set(&StorageKey::TotalFeesCollected, &total_fees_collected);
+        env.storage()
+            .instance()
+            .extend_ttl(crate::storage::TTL_THRESHOLD, crate::storage::TTL_BUMP);
+
         // Interactions: External calls AFTER state updates
         let token_client = token::Client::new(&env, &agreement.payment_token);
         token_client.transfer(&from, &agreement.landlord, &landlord_amount);
@@ -419,7 +436,7 @@ impl PaymentContract {
 
         events::rent_paid(
             &env,
-            agreement_id,
+            agreement_id.clone(),
             from,
             agreement.landlord.clone(),
             agreement.payment_token.clone(),
@@ -427,8 +444,18 @@ impl PaymentContract {
             landlord_amount,
             platform_amount,
         );
+        events::fees_accrued(&env, agreement_id, platform_amount, total_fees_collected);
 
         Ok(())
+    }
+
+    /// Total platform fees collected across all `pay_rent` calls (#1563),
+    /// queryable on-chain rather than only reconstructable from event logs.
+    pub fn get_total_fees_collected(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&StorageKey::TotalFeesCollected)
+            .unwrap_or(0i128)
     }
 
     /// Get payment details for a specific month

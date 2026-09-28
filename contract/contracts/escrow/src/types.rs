@@ -169,4 +169,9 @@ pub enum DataKey {
     Paused,
     /// Upgrade proposal
     UpgradeProposal(String),
+    /// Running total of the platform governance share collected across all
+    /// `release_rent` calls (#1563), so "how much fee revenue has been
+    /// collected" has an on-chain, queryable answer instead of only being
+    /// reconstructable by replaying every `RentReleased` event.
+    TotalGovernanceFeesCollected,
 }
