@@ -203,6 +203,8 @@ fn setup(
     Address,
     Address,
     Address,
+    String,
+    Address,
 ) {
     let contract_id = env.register(EscrowContract, ());
     let client = EscrowContractClient::new(env, &contract_id);
@@ -215,6 +217,9 @@ fn setup(
 
     let token_id = env.register(MaliciousToken, ());
 
+    let agreement_id = String::from_str(env, "agreement-1");
+    let dispute_resolution_contract = crate::tests_support::deploy_mock_dispute_resolution(env);
+
     (
         client,
         depositor,
@@ -223,6 +228,8 @@ fn setup(
         platform_governance,
         agent_referral,
         token_id,
+        agreement_id,
+        dispute_resolution_contract,
     )
 }
 
@@ -235,8 +242,17 @@ fn test_fund_escrow_reentrancy_cannot_double_fund() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (client, depositor, beneficiary, arbiter, platform_governance, agent_referral, token) =
-        setup(&env);
+    let (
+        client,
+        depositor,
+        beneficiary,
+        arbiter,
+        platform_governance,
+        agent_referral,
+        token,
+        agreement_id,
+        dispute_resolution_contract,
+    ) = setup(&env);
     let amount = 1000i128;
 
     let escrow_id = client.create(
@@ -247,6 +263,8 @@ fn test_fund_escrow_reentrancy_cannot_double_fund() {
         &agent_referral,
         &amount,
         &token,
+        &agreement_id,
+        &dispute_resolution_contract,
     );
 
     let token_client = MaliciousTokenClient::new(&env, &token);
@@ -284,8 +302,17 @@ fn test_fund_escrow_without_reentrancy_succeeds_normally() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (client, depositor, beneficiary, arbiter, platform_governance, agent_referral, token) =
-        setup(&env);
+    let (
+        client,
+        depositor,
+        beneficiary,
+        arbiter,
+        platform_governance,
+        agent_referral,
+        token,
+        agreement_id,
+        dispute_resolution_contract,
+    ) = setup(&env);
     let amount = 500i128;
 
     let escrow_id = client.create(
@@ -296,6 +323,8 @@ fn test_fund_escrow_without_reentrancy_succeeds_normally() {
         &agent_referral,
         &amount,
         &token,
+        &agreement_id,
+        &dispute_resolution_contract,
     );
 
     let token_client = MaliciousTokenClient::new(&env, &token);

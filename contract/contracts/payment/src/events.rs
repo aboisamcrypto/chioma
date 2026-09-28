@@ -123,6 +123,16 @@ pub struct PlatformFeeCollectorUpdated {
     pub updated_at: u64,
 }
 
+/// Event emitted when the `chioma` contract address used for cross-contract
+/// agreement verification is updated (#1559)
+/// Topics: ["chioma_contract_updated", chioma_contract: Address]
+#[contractevent(topics = ["chioma_contract_updated"])]
+pub struct ChiomaContractUpdated {
+    #[topic]
+    pub chioma_contract: Address,
+    pub updated_at: u64,
+}
+
 /// Event emitted when the contract admin is initialized (#1689)
 /// Topics: ["admin_initialized", admin: Address]
 #[contractevent(topics = ["admin_initialized"])]
@@ -316,6 +326,14 @@ pub(crate) fn rent_paid(
 pub(crate) fn platform_fee_collector_updated(env: &Env, collector: Address) {
     PlatformFeeCollectorUpdated {
         collector,
+        updated_at: env.ledger().timestamp(),
+    }
+    .publish(env);
+}
+
+pub(crate) fn chioma_contract_updated(env: &Env, chioma_contract: Address) {
+    ChiomaContractUpdated {
+        chioma_contract,
         updated_at: env.ledger().timestamp(),
     }
     .publish(env);

@@ -2254,11 +2254,13 @@ fn test_save_extends_escrow_ttl() {
 
     let escrow = Escrow {
         id: escrow_id.clone(),
+        agreement_id: soroban_sdk::String::from_str(&env, "agreement-ttl-1"),
         depositor: party.clone(),
         beneficiary: party.clone(),
         arbiter: party.clone(),
         platform_governance: party.clone(),
         agent_referral: party.clone(),
+        dispute_resolution_contract: party.clone(),
         amount: 1000,
         token,
         status: EscrowStatus::Pending,
