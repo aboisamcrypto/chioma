@@ -460,6 +460,7 @@ const paymentSchema = Joi.object({
   }),
   PAYMENT_GATEWAY_TIMEOUT_MS: Joi.number().min(1),
   PAYMENT_WEBHOOK_SECRET: requiredWhenDeployed(),
+  PAYMENT_WEBHOOK_SECRET_PREVIOUS: Joi.string().allow(''),
 });
 
 const emailSchema = Joi.object({

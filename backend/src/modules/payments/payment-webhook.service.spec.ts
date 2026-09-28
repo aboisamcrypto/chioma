@@ -21,6 +21,8 @@ describe('PaymentWebhookService', () => {
     process: jest.Mock;
     retrieve: jest.Mock;
     store: jest.Mock;
+    claim: jest.Mock;
+    releaseClaim: jest.Mock;
   };
   let originalSecret: string | undefined;
 
@@ -40,6 +42,8 @@ describe('PaymentWebhookService', () => {
       ),
       retrieve: jest.fn().mockResolvedValue(null),
       store: jest.fn().mockResolvedValue(undefined),
+      claim: jest.fn().mockResolvedValue('claim-token'),
+      releaseClaim: jest.fn().mockResolvedValue(undefined),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -243,10 +247,14 @@ describe('PaymentWebhookService', () => {
         expect.any(Object),
         expect.any(Number),
       );
+      expect(idempotencyService.claim).toHaveBeenCalledWith(
+        'webhook:refund:0f7b87dd-c76d-4f24-a4d6-8c0dc5ad5a6d',
+        expect.any(Number),
+      );
     });
 
     it('rejects duplicate refund webhook deliveries with conflict', async () => {
-      idempotencyService.retrieve.mockResolvedValue({ processedAt: 'now' });
+      idempotencyService.claim.mockResolvedValue(null);
 
       await expect(
         service.handleRefundWebhook({
@@ -260,6 +268,25 @@ describe('PaymentWebhookService', () => {
         }),
       ).rejects.toThrow(ConflictException);
       expect(paymentRepository.findOne).not.toHaveBeenCalled();
+      expect(idempotencyService.store).not.toHaveBeenCalled();
+    });
+
+    it('releases an unprocessed claim when refund processing fails', async () => {
+      paymentRepository.findOne.mockRejectedValue(new Error('database error'));
+
+      await expect(
+        service.handleRefundWebhook({
+          eventType: 'refund.completed',
+          idempotencyKey: '0f7b87dd-c76d-4f24-a4d6-8c0dc5ad5a6d',
+          timestamp: new Date().toISOString(),
+          paymentId: 'pay_1',
+          status: 'completed',
+        }),
+      ).rejects.toThrow('database error');
+      expect(idempotencyService.releaseClaim).toHaveBeenCalledWith(
+        'webhook:refund:0f7b87dd-c76d-4f24-a4d6-8c0dc5ad5a6d',
+        'claim-token',
+      );
     });
 
     it('rejects invalid refund webhook payloads', async () => {

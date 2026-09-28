@@ -109,7 +109,7 @@ export class WebhookSignatureService {
     payload: string,
     signature: string | undefined,
     timestamp: string | undefined,
-    secret: string | undefined,
+    secret: string | readonly string[] | undefined,
     toleranceMs: number = DEFAULT_TOLERANCE_MS,
     context: WebhookVerificationContext = {},
   ): void {
@@ -128,7 +128,10 @@ export class WebhookSignatureService {
       throw new UnauthorizedException('Missing webhook signature');
     }
 
-    if (!secret) {
+    const secrets = (Array.isArray(secret) ? secret : [secret]).filter(
+      (value): value is string => Boolean(value),
+    );
+    if (secrets.length === 0) {
       this.logRejection(
         WEBHOOK_SIGNATURE_REJECTION_REASONS.SECRET_NOT_CONFIGURED,
         'Webhook secret is not configured',
@@ -167,18 +170,24 @@ export class WebhookSignatureService {
       throw new UnauthorizedException('Webhook timestamp expired');
     }
 
-    const expectedSignature = this.generateSignature(
-      payload,
-      timestamp,
-      secret,
-    );
     const signatureBuffer = Buffer.from(signature, 'hex');
-    const expectedBuffer = Buffer.from(expectedSignature, 'hex');
+    let expectedSignature = '';
+    let matched = false;
+    for (const candidateSecret of secrets) {
+      const candidateSignature = this.generateSignature(
+        payload,
+        timestamp,
+        candidateSecret,
+      );
+      const expectedBuffer = Buffer.from(candidateSignature, 'hex');
+      const candidateMatched =
+        signatureBuffer.length === expectedBuffer.length &&
+        crypto.timingSafeEqual(signatureBuffer, expectedBuffer);
+      matched = candidateMatched || matched;
+      if (!expectedSignature) expectedSignature = candidateSignature;
+    }
 
-    if (
-      signatureBuffer.length !== expectedBuffer.length ||
-      !crypto.timingSafeEqual(signatureBuffer, expectedBuffer)
-    ) {
+    if (!matched) {
       this.logRejection(
         WEBHOOK_SIGNATURE_REJECTION_REASONS.SIGNATURE_MISMATCH,
         'Rejected webhook with invalid signature',

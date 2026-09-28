@@ -13,6 +13,7 @@ import { PaymentGatewayWebhookDto } from './dto/payment-gateway.dto';
 import { IdempotencyService } from '../../common/idempotency';
 
 const WEBHOOK_IDEMPOTENCY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const WEBHOOK_PROCESSING_CLAIM_TTL_MS = 5 * 60 * 1000;
 import {
   parsePaymentWebhookDto,
   type PaymentWebhookPayload,
@@ -52,11 +53,24 @@ export class PaymentWebhookService {
     this.assertWebhookSecret(secretHeader);
     const dto = parseRefundWebhookDto(body);
     const idempotencyKey = `webhook:refund:${dto.idempotencyKey}`;
-    const existing = await this.idempotencyService.retrieve(idempotencyKey);
-    if (existing !== null) {
+    const claimToken = await this.idempotencyService.claim(
+      idempotencyKey,
+      WEBHOOK_PROCESSING_CLAIM_TTL_MS,
+    );
+    if (claimToken === null) {
       throw new ConflictException('Duplicate refund webhook');
     }
-    const result = await this.applyRefundWebhook(dto);
+    let result: {
+      processed: boolean;
+      reason?: string;
+      payment?: Payment;
+    };
+    try {
+      result = await this.applyRefundWebhook(dto);
+    } catch (error) {
+      await this.idempotencyService.releaseClaim(idempotencyKey, claimToken);
+      throw error;
+    }
     await this.idempotencyService.store(
       idempotencyKey,
       { processedAt: new Date().toISOString() },

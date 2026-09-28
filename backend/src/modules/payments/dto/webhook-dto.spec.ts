@@ -107,4 +107,26 @@ describe('RefundWebhookDto (zod)', () => {
       }),
     ).toThrow(/timestamp/);
   });
+
+  it('rejects a non-UUID refund idempotency key and an invalid timestamp', () => {
+    expect(() =>
+      parseRefundWebhookDto({
+        eventType: 'refund.completed',
+        idempotencyKey: 'not-a-uuid',
+        timestamp: 'not-a-timestamp',
+        paymentId: 'pay_1',
+        status: 'completed',
+      }),
+    ).toThrow(/idempotencyKey/);
+
+    expect(() =>
+      parseRefundWebhookDto({
+        eventType: 'refund.completed',
+        idempotencyKey: '0f7b87dd-c76d-4f24-a4d6-8c0dc5ad5a6d',
+        timestamp: 'not-a-timestamp',
+        paymentId: 'pay_1',
+        status: 'completed',
+      }),
+    ).toThrow(/timestamp/);
+  });
 });
