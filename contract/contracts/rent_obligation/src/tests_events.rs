@@ -75,10 +75,14 @@ fn test_initialize_emits_contract_initialized_event() {
 
     let event = events.last().unwrap();
     assert_eq!(event.0, client.address);
-    // Topics: [event_name]
-    assert_eq!(event.1.len(), 1);
+    // Topics: [version, event_name] (#1681)
+    assert_eq!(event.1.len(), 2);
     assert_eq!(
         topic_symbol(&env, &event.1.get(0).unwrap()),
+        Symbol::new(&env, "v1")
+    );
+    assert_eq!(
+        topic_symbol(&env, &event.1.get(1).unwrap()),
         Symbol::new(&env, "initialized")
     );
 
@@ -105,13 +109,17 @@ fn test_mint_obligation_emits_obligation_minted_event() {
 
     let event = events.last().unwrap();
     assert_eq!(event.0, client.address);
-    // Topics: [event_name, landlord]
-    assert_eq!(event.1.len(), 2);
+    // Topics: [version, event_name, landlord] (#1681)
+    assert_eq!(event.1.len(), 3);
     assert_eq!(
         topic_symbol(&env, &event.1.get(0).unwrap()),
+        Symbol::new(&env, "v1")
+    );
+    assert_eq!(
+        topic_symbol(&env, &event.1.get(1).unwrap()),
         Symbol::new(&env, "minted")
     );
-    assert_eq!(topic_address(&env, &event.1.get(1).unwrap()), landlord);
+    assert_eq!(topic_address(&env, &event.1.get(2).unwrap()), landlord);
 
     // Data: agreement_id, minted_at
     let data = data_map(&env, &event.2);
@@ -138,14 +146,18 @@ fn test_transfer_obligation_emits_obligation_transferred_event() {
 
     let event = events.last().unwrap();
     assert_eq!(event.0, client.address);
-    // Topics: [event_name, from, to]
-    assert_eq!(event.1.len(), 3);
+    // Topics: [version, event_name, from, to] (#1681)
+    assert_eq!(event.1.len(), 4);
     assert_eq!(
         topic_symbol(&env, &event.1.get(0).unwrap()),
+        Symbol::new(&env, "v1")
+    );
+    assert_eq!(
+        topic_symbol(&env, &event.1.get(1).unwrap()),
         Symbol::new(&env, "transferred")
     );
-    assert_eq!(topic_address(&env, &event.1.get(1).unwrap()), landlord);
-    assert_eq!(topic_address(&env, &event.1.get(2).unwrap()), new_owner);
+    assert_eq!(topic_address(&env, &event.1.get(2).unwrap()), landlord);
+    assert_eq!(topic_address(&env, &event.1.get(3).unwrap()), new_owner);
 
     // Data: agreement_id
     let data = data_map(&env, &event.2);
@@ -176,13 +188,17 @@ fn test_burn_nft_emits_obligation_burned_event() {
 
     let event = events.last().unwrap();
     assert_eq!(event.0, client.address);
-    // Topics: [event_name, owner]
-    assert_eq!(event.1.len(), 2);
+    // Topics: [version, event_name, owner] (#1681)
+    assert_eq!(event.1.len(), 3);
     assert_eq!(
         topic_symbol(&env, &event.1.get(0).unwrap()),
+        Symbol::new(&env, "v1")
+    );
+    assert_eq!(
+        topic_symbol(&env, &event.1.get(1).unwrap()),
         Symbol::new(&env, "burned")
     );
-    assert_eq!(topic_address(&env, &event.1.get(1).unwrap()), landlord);
+    assert_eq!(topic_address(&env, &event.1.get(2).unwrap()), landlord);
 
     // Data: token_id, reason
     let data = data_map(&env, &event.2);
@@ -206,13 +222,17 @@ fn test_initialize_admin_emits_admin_initialized_event() {
 
     let event = events.last().unwrap();
     assert_eq!(event.0, client.address);
-    // Topics: [event_name, admin]
-    assert_eq!(event.1.len(), 2);
+    // Topics: [version, event_name, admin] (#1681)
+    assert_eq!(event.1.len(), 3);
     assert_eq!(
         topic_symbol(&env, &event.1.get(0).unwrap()),
+        Symbol::new(&env, "v1")
+    );
+    assert_eq!(
+        topic_symbol(&env, &event.1.get(1).unwrap()),
         Symbol::new(&env, "admin_initialized")
     );
-    assert_eq!(topic_address(&env, &event.1.get(1).unwrap()), admin);
+    assert_eq!(topic_address(&env, &event.1.get(2).unwrap()), admin);
 
     let data = data_map(&env, &event.2);
     assert!(data.contains_key(Symbol::new(&env, "initialized_at")));
@@ -236,14 +256,18 @@ fn test_update_admin_emits_admin_updated_event() {
 
     let event = events.last().unwrap();
     assert_eq!(event.0, client.address);
-    // Topics: [event_name, old_admin, new_admin]
-    assert_eq!(event.1.len(), 3);
+    // Topics: [version, event_name, old_admin, new_admin] (#1681)
+    assert_eq!(event.1.len(), 4);
     assert_eq!(
         topic_symbol(&env, &event.1.get(0).unwrap()),
+        Symbol::new(&env, "v1")
+    );
+    assert_eq!(
+        topic_symbol(&env, &event.1.get(1).unwrap()),
         Symbol::new(&env, "admin_updated")
     );
-    assert_eq!(topic_address(&env, &event.1.get(1).unwrap()), admin);
-    assert_eq!(topic_address(&env, &event.1.get(2).unwrap()), new_admin);
+    assert_eq!(topic_address(&env, &event.1.get(2).unwrap()), admin);
+    assert_eq!(topic_address(&env, &event.1.get(3).unwrap()), new_admin);
 
     let data = data_map(&env, &event.2);
     assert!(data.contains_key(Symbol::new(&env, "updated_at")));
@@ -271,13 +295,17 @@ fn test_admin_reassign_obligation_emits_obligation_admin_reassigned_event() {
 
     let event = events.last().unwrap();
     assert_eq!(event.0, client.address);
-    // Topics: [event_name, agreement_id]
-    assert_eq!(event.1.len(), 2);
+    // Topics: [version, event_name, agreement_id] (#1681)
+    assert_eq!(event.1.len(), 3);
     assert_eq!(
         topic_symbol(&env, &event.1.get(0).unwrap()),
+        Symbol::new(&env, "v1")
+    );
+    assert_eq!(
+        topic_symbol(&env, &event.1.get(1).unwrap()),
         Symbol::new(&env, "admin_reassigned")
     );
-    assert_eq!(topic_string(&env, &event.1.get(1).unwrap()), agreement_id);
+    assert_eq!(topic_string(&env, &event.1.get(2).unwrap()), agreement_id);
 
     // Data: admin, previous_owner, new_owner
     let data = data_map(&env, &event.2);
@@ -306,13 +334,17 @@ fn test_propose_upgrade_emits_upgrade_proposed_event() {
 
     let event = events.last().unwrap();
     assert_eq!(event.0, client.address);
-    // Topics: [event_name, proposal_id]
-    assert_eq!(event.1.len(), 2);
+    // Topics: [version, event_name, proposal_id] (#1681)
+    assert_eq!(event.1.len(), 3);
     assert_eq!(
         topic_symbol(&env, &event.1.get(0).unwrap()),
+        Symbol::new(&env, "v1")
+    );
+    assert_eq!(
+        topic_symbol(&env, &event.1.get(1).unwrap()),
         Symbol::new(&env, "upgrade_proposed")
     );
-    assert_eq!(topic_string(&env, &event.1.get(1).unwrap()), proposal_id);
+    assert_eq!(topic_string(&env, &event.1.get(2).unwrap()), proposal_id);
 
     // Data: proposer, eta, created_at
     let data = data_map(&env, &event.2);
@@ -342,13 +374,17 @@ fn test_approve_upgrade_emits_upgrade_approved_event() {
 
     let event = events.last().unwrap();
     assert_eq!(event.0, client.address);
-    // Topics: [event_name, proposal_id]
-    assert_eq!(event.1.len(), 2);
+    // Topics: [version, event_name, proposal_id] (#1681)
+    assert_eq!(event.1.len(), 3);
     assert_eq!(
         topic_symbol(&env, &event.1.get(0).unwrap()),
+        Symbol::new(&env, "v1")
+    );
+    assert_eq!(
+        topic_symbol(&env, &event.1.get(1).unwrap()),
         Symbol::new(&env, "upgrade_approved")
     );
-    assert_eq!(topic_string(&env, &event.1.get(1).unwrap()), proposal_id);
+    assert_eq!(topic_string(&env, &event.1.get(2).unwrap()), proposal_id);
 
     // Data: approver, approval_count (proposer's initial approval + this
     // one = 2)
@@ -384,13 +420,17 @@ fn test_execute_upgrade_emits_upgrade_executed_event() {
 
     let event = events.last().unwrap();
     assert_eq!(event.0, client.address);
-    // Topics: [event_name, proposal_id]
-    assert_eq!(event.1.len(), 2);
+    // Topics: [version, event_name, proposal_id] (#1681)
+    assert_eq!(event.1.len(), 3);
     assert_eq!(
         topic_symbol(&env, &event.1.get(0).unwrap()),
+        Symbol::new(&env, "v1")
+    );
+    assert_eq!(
+        topic_symbol(&env, &event.1.get(1).unwrap()),
         Symbol::new(&env, "upgrade_executed")
     );
-    assert_eq!(topic_string(&env, &event.1.get(1).unwrap()), proposal_id);
+    assert_eq!(topic_string(&env, &event.1.get(2).unwrap()), proposal_id);
 
     // Data: executor, executed_at
     let data = data_map(&env, &event.2);
