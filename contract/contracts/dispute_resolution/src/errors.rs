@@ -32,6 +32,12 @@ pub enum DisputeError {
     InvalidRating = 26,
     RateLimitExceeded = 27,
     CooldownNotMet = 28,
+    /// The cross-contract call to the configured `chioma` contract to
+    /// resolve agreement data failed outright (contract unavailable,
+    /// reverted, or otherwise did not return successfully). Distinct from
+    /// `AgreementNotFound`, which means the call succeeded but the
+    /// agreement id simply does not exist there.
+    AgreementLookupFailed = 29,
 }
 
 /// Pins every `DisputeError` discriminant so off-chain code that maps error
@@ -72,5 +78,6 @@ mod pin_tests {
         assert_eq!(DisputeError::InvalidRating as u32, 26);
         assert_eq!(DisputeError::RateLimitExceeded as u32, 27);
         assert_eq!(DisputeError::CooldownNotMet as u32, 28);
+        assert_eq!(DisputeError::AgreementLookupFailed as u32, 29);
     }
 }

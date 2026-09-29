@@ -107,3 +107,34 @@ pub fn unpause(env: Env, caller: Address) -> Result<(), Error> {
     events::contract_unpaused(&env, caller);
     Ok(())
 }
+
+/// Get the configured `chioma` contract address, if any (#1559).
+pub fn get_chioma_contract(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::ChiomaContract)
+}
+
+/// Set the `chioma` contract address that `pay_rent` cross-checks agreement
+/// data against (#1559). Admin only, so the trust boundary for "which
+/// chioma deployment is authoritative" is explicit and not settable by an
+/// arbitrary caller.
+///
+/// # Errors
+/// - `AdminNotSet` / `Unauthorized` if caller is not the admin.
+pub fn set_chioma_contract(
+    env: Env,
+    caller: Address,
+    chioma_contract: Address,
+) -> Result<(), Error> {
+    require_admin(&env, &caller)?;
+    caller.require_auth();
+
+    env.storage()
+        .instance()
+        .set(&DataKey::ChiomaContract, &chioma_contract);
+    env.storage()
+        .instance()
+        .extend_ttl(crate::storage::TTL_THRESHOLD, crate::storage::TTL_BUMP);
+
+    events::chioma_contract_updated(&env, chioma_contract);
+    Ok(())
+}

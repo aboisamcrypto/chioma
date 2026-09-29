@@ -1,5 +1,10 @@
 import { Logger } from '@nestjs/common';
 import { I18nService } from '../src/modules/i18n/i18n.service';
+import { LoggerService } from '../src/common/services/logger.service';
+
+const logger = new LoggerService(undefined, 'i18n-manage');
+
+const CONTEXT = 'I18nManage';
 
 function run(): void {
   const logger = new Logger('I18nManage');
@@ -24,6 +29,7 @@ function run(): void {
   logger.log(
     `ar security.accountLocked: ${i18n.t('security.accountLocked', 'ar')}`,
   );
+  Logger.log('I18n language coverage audit completed', CONTEXT);
 }
 
 run();

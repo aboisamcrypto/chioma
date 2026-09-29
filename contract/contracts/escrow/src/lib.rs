@@ -43,6 +43,8 @@ mod tests_support;
 
 #[cfg(test)]
 mod tests_dispute_resolution_integration;
+
+#[cfg(test)]
 mod tests_reentrancy;
 
 // Re-export public APIs

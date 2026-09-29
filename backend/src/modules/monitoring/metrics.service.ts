@@ -248,6 +248,13 @@ export class MetricsService implements OnModuleInit {
     registers: [this.registry],
   });
 
+  private readonly decryptionFailures = new Counter({
+    name: 'decryption_failures_total',
+    help: 'Total decryption failures by reason (INVALID_FORMAT, INVALID_KEY, CORRUPTED_DATA, TAMPERING)',
+    labelNames: ['reason'] as const,
+    registers: [this.registry],
+  });
+
   private readonly blockchainConnectivityUp = new Gauge({
     name: 'blockchain_connectivity_up',
     help: 'Whether the blockchain RPC/Horizon endpoint is reachable (1) or not (0)',
@@ -479,6 +486,15 @@ export class MetricsService implements OnModuleInit {
    */
   recordWebhookSignatureVerification(result: string): void {
     this.webhookSignatureVerifications.inc({ result });
+  }
+
+  /**
+   * Record a decryption failure by reason so ops can distinguish between a
+   * misconfigured key (INVALID_KEY), data corruption (CORRUPTED_DATA), and
+   * active tampering (TAMPERING) in dashboards and alerts.
+   */
+  recordDecryptionFailure(reason: string): void {
+    this.decryptionFailures.inc({ reason });
   }
 
   recordBlockchainConnectivityCheck(

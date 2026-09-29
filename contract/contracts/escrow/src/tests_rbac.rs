@@ -927,8 +927,17 @@ fn test_create_blocked_while_paused() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (client, depositor, beneficiary, arbiter, platform_governance, agent_referral, token) =
-        setup(&env);
+    let (
+        client,
+        depositor,
+        beneficiary,
+        arbiter,
+        platform_governance,
+        agent_referral,
+        token,
+        agreement_id,
+        dispute_resolution_contract,
+    ) = setup(&env);
     let admin = Address::generate(&env);
     client.initialize_admin(&admin);
     client.pause(&admin);
@@ -941,6 +950,8 @@ fn test_create_blocked_while_paused() {
         &agent_referral,
         &1000,
         &token,
+        &agreement_id,
+        &dispute_resolution_contract,
     );
     assert_eq!(result, Err(Ok(EscrowError::ContractPaused)));
 }
@@ -950,8 +961,17 @@ fn test_fund_escrow_blocked_while_paused() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (client, depositor, beneficiary, arbiter, platform_governance, agent_referral, token) =
-        setup(&env);
+    let (
+        client,
+        depositor,
+        beneficiary,
+        arbiter,
+        platform_governance,
+        agent_referral,
+        token,
+        agreement_id,
+        dispute_resolution_contract,
+    ) = setup(&env);
     let admin = Address::generate(&env);
     client.initialize_admin(&admin);
 
@@ -963,6 +983,8 @@ fn test_fund_escrow_blocked_while_paused() {
         &agent_referral,
         &1000,
         &token,
+        &agreement_id,
+        &dispute_resolution_contract,
     );
     let token_admin_client = TokenAdminClient::new(&env, &token);
     token_admin_client.mint(&depositor, &1000);
@@ -978,8 +1000,17 @@ fn test_approve_release_blocked_while_paused() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (client, depositor, beneficiary, arbiter, platform_governance, agent_referral, token) =
-        setup(&env);
+    let (
+        client,
+        depositor,
+        beneficiary,
+        arbiter,
+        platform_governance,
+        agent_referral,
+        token,
+        agreement_id,
+        dispute_resolution_contract,
+    ) = setup(&env);
     let admin = Address::generate(&env);
     client.initialize_admin(&admin);
 
@@ -992,6 +1023,8 @@ fn test_approve_release_blocked_while_paused() {
         &platform_governance,
         &agent_referral,
         &token,
+        &agreement_id,
+        &dispute_resolution_contract,
         1000,
     );
 
@@ -1006,8 +1039,17 @@ fn test_initiate_dispute_blocked_while_paused() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (client, depositor, beneficiary, arbiter, platform_governance, agent_referral, token) =
-        setup(&env);
+    let (
+        client,
+        depositor,
+        beneficiary,
+        arbiter,
+        platform_governance,
+        agent_referral,
+        token,
+        agreement_id,
+        dispute_resolution_contract,
+    ) = setup(&env);
     let admin = Address::generate(&env);
     client.initialize_admin(&admin);
 
@@ -1020,6 +1062,8 @@ fn test_initiate_dispute_blocked_while_paused() {
         &platform_governance,
         &agent_referral,
         &token,
+        &agreement_id,
+        &dispute_resolution_contract,
         1000,
     );
 
@@ -1035,8 +1079,17 @@ fn test_reads_remain_available_while_paused() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (client, depositor, beneficiary, arbiter, platform_governance, agent_referral, token) =
-        setup(&env);
+    let (
+        client,
+        depositor,
+        beneficiary,
+        arbiter,
+        platform_governance,
+        agent_referral,
+        token,
+        agreement_id,
+        dispute_resolution_contract,
+    ) = setup(&env);
     let admin = Address::generate(&env);
     client.initialize_admin(&admin);
 
@@ -1049,6 +1102,8 @@ fn test_reads_remain_available_while_paused() {
         &platform_governance,
         &agent_referral,
         &token,
+        &agreement_id,
+        &dispute_resolution_contract,
         1000,
     );
 
@@ -1067,8 +1122,17 @@ fn test_unpausing_restores_normal_operation() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (client, depositor, beneficiary, arbiter, platform_governance, agent_referral, token) =
-        setup(&env);
+    let (
+        client,
+        depositor,
+        beneficiary,
+        arbiter,
+        platform_governance,
+        agent_referral,
+        token,
+        agreement_id,
+        dispute_resolution_contract,
+    ) = setup(&env);
     let admin = Address::generate(&env);
     client.initialize_admin(&admin);
 
@@ -1081,6 +1145,8 @@ fn test_unpausing_restores_normal_operation() {
         &platform_governance,
         &agent_referral,
         &token,
+        &agreement_id,
+        &dispute_resolution_contract,
         1000,
     );
 
@@ -1098,8 +1164,17 @@ fn test_admin_can_still_freeze_and_unfreeze_while_paused() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (client, depositor, beneficiary, arbiter, platform_governance, agent_referral, token) =
-        setup(&env);
+    let (
+        client,
+        depositor,
+        beneficiary,
+        arbiter,
+        platform_governance,
+        agent_referral,
+        token,
+        agreement_id,
+        dispute_resolution_contract,
+    ) = setup(&env);
     let admin = Address::generate(&env);
     client.initialize_admin(&admin);
 
@@ -1112,6 +1187,8 @@ fn test_admin_can_still_freeze_and_unfreeze_while_paused() {
         &platform_governance,
         &agent_referral,
         &token,
+        &agreement_id,
+        &dispute_resolution_contract,
         1000,
     );
 
