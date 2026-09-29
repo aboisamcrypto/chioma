@@ -1,11 +1,47 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { HttpStatus } from '@nestjs/common';
 import * as nacl from 'tweetnacl';
 import { StellarConfig } from '../config/stellar.config';
 import { ConfigurationError } from '../../../common/errors';
 import { BaseAppError } from '../../../common/errors/base.error';
 import { ErrorCode } from '../../../common/errors/error-codes';
 import { HttpStatus } from '@nestjs/common';
+import { DecryptionError, DecryptionErrorType } from './decryption.error';
+
+export { DecryptionError, DecryptionErrorType } from './decryption.error';
+import { ConfigurationError, BaseAppError, ErrorCode } from '../../../common/errors';
+import { MetricsService } from '../../monitoring/metrics.service';
+
+// ── Structured decryption error ──────────────────────────────────────────────
+
+/** Discriminator for the root cause of a decryption failure. */
+export type DecryptionFailureReason =
+  | 'INVALID_FORMAT'   // base64 parse failed or payload too short to contain nonce
+  | 'INVALID_KEY'      // key material is confirmed wrong (startup self-test path)
+  | 'CORRUPTED_DATA'   // payload is well-formed but MAC verification failed
+  | 'TAMPERING';       // structurally valid, full-length payload, MAC failed → likely tamper
+
+export class DecryptionError extends BaseAppError {
+  public readonly reason: DecryptionFailureReason;
+
+  constructor(reason: DecryptionFailureReason, context?: Record<string, unknown>) {
+    const messages: Record<DecryptionFailureReason, string> = {
+      INVALID_FORMAT:  'Decryption failed: malformed or truncated ciphertext',
+      INVALID_KEY:     'Decryption failed: incorrect encryption key',
+      CORRUPTED_DATA:  'Decryption failed: ciphertext is corrupted',
+      TAMPERING:       'Decryption failed: authentication tag mismatch — possible tampering',
+    };
+    super(
+      ErrorCode.DECRYPTION_ERROR,
+      HttpStatus.BAD_REQUEST,
+      messages[reason],
+      true,
+      { reason, ...context },
+    );
+    this.reason = reason;
+  }
+}
 
 /** Minimum length (chars) accepted for a raw encryption key string. */
 const MIN_KEY_LENGTH = 32;
@@ -62,11 +98,27 @@ export class DecryptionError extends BaseAppError {
     this.reason = reason;
   }
 }
+ * Versioned envelope: `v1.<keyFingerprint>.<base64(nonce + ciphertext)>`.
+ * The fingerprint (first 4 bytes of SHA-512 of the derived key, hex) lets
+ * decryption tell a wrong key apart from tampered data. Unprefixed legacy
+ * payloads (plain base64) are still accepted.
+ */
+const ENVELOPE_VERSION = 'v1';
+const FINGERPRINT_BYTES = 4;
+const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
 
 @Injectable()
 export class EncryptionService implements OnModuleInit {
   private readonly logger = new Logger(EncryptionService.name);
   private readonly encryptionKey: Uint8Array;
+  private readonly keyFingerprint: string;
+
+  /** Decryption failure counters by type, for metrics/health reporting. */
+  private readonly decryptionFailures: Record<DecryptionErrorType, number> = {
+    [DecryptionErrorType.INVALID_KEY]: 0,
+    [DecryptionErrorType.CORRUPTED_DATA]: 0,
+    [DecryptionErrorType.TAMPERING]: 0,
+  };
 
   /**
    * True when the key passed all validation checks at construction time.
@@ -80,7 +132,10 @@ export class EncryptionService implements OnModuleInit {
    */
   private readonly keyInvalidReason: string | null;
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    @Optional() private readonly metricsService?: MetricsService,
+  ) {
     const keyString =
       this.configService.get<StellarConfig>('stellar')?.encryptionKey ?? '';
 
@@ -91,6 +146,9 @@ export class EncryptionService implements OnModuleInit {
     // Always derive the key so the rest of the class stays consistent; runtime
     // operations throw immediately if keyValid is false.
     this.encryptionKey = this.deriveKey(keyString);
+    this.keyFingerprint = Buffer.from(
+      nacl.hash(this.encryptionKey).slice(0, FINGERPRINT_BYTES),
+    ).toString('hex');
 
     if (!valid) {
       this.logger.error(
@@ -192,8 +250,9 @@ export class EncryptionService implements OnModuleInit {
       combined.set(nonce);
       combined.set(ciphertext, nonce.length);
 
-      // Return as base64
-      return Buffer.from(combined).toString('base64');
+      return `${ENVELOPE_VERSION}.${this.keyFingerprint}.${Buffer.from(
+        combined,
+      ).toString('base64')}`;
     } catch (error) {
       this.logger.error('Encryption failed', error);
       throw new Error('Failed to encrypt secret key');
@@ -210,7 +269,10 @@ export class EncryptionService implements OnModuleInit {
    *                      (most likely wrong key / env var misconfiguration)
    *
    * @param encryptedData - Base64 encoded encrypted data (nonce + ciphertext)
+   * @param encryptedData - `v1.<fingerprint>.<base64>` envelope or legacy base64
    * @returns Decrypted secret key
+   * @throws DecryptionError with type INVALID_KEY, CORRUPTED_DATA or TAMPERING
+   * @throws {DecryptionError} with a discriminated `reason` field
    */
   decrypt(encryptedData: string): string {
     this.assertKeyValid();
@@ -322,7 +384,156 @@ export class EncryptionService implements OnModuleInit {
         err.message,
       );
       throw err;
+    // ── 1. Parse & structural validation ──────────────────────────────────
+    let combined: Buffer;
+    try {
+      return this.decryptOrThrow(encryptedData);
+    } catch (error) {
+      const failure =
+        error instanceof DecryptionError
+          ? error
+          : new DecryptionError(
+              DecryptionErrorType.CORRUPTED_DATA,
+              `Unexpected decryption failure: ${(error as Error)?.message}`,
+            );
+      this.decryptionFailures[failure.type]++;
+      this.logger.error(
+        `Decryption failed [${failure.type}]: ${failure.message}`,
+      );
+      throw failure;
     }
+  }
+
+  /** Snapshot of decryption failure counts by type (no key material). */
+  getDecryptionFailureMetrics(): Record<DecryptionErrorType, number> {
+    return { ...this.decryptionFailures };
+  }
+
+  private decryptOrThrow(encryptedData: string): string {
+    if (typeof encryptedData !== 'string' || encryptedData.length === 0) {
+      throw new DecryptionError(
+        DecryptionErrorType.CORRUPTED_DATA,
+        'Encrypted payload is empty',
+      );
+    }
+
+    let payload = encryptedData;
+    let fingerprint: string | null = null;
+    if (encryptedData.startsWith(`${ENVELOPE_VERSION}.`)) {
+      const parts = encryptedData.split('.');
+      if (parts.length !== 3) {
+        throw new DecryptionError(
+          DecryptionErrorType.CORRUPTED_DATA,
+          'Malformed encryption envelope',
+        );
+      }
+      [, fingerprint, payload] = parts;
+    }
+
+    if (fingerprint !== null && fingerprint !== this.keyFingerprint) {
+      throw new DecryptionError(
+        DecryptionErrorType.INVALID_KEY,
+        'Payload was encrypted with a different key (fingerprint mismatch)',
+      );
+    }
+
+    if (!BASE64_PATTERN.test(payload)) {
+      throw new DecryptionError(
+        DecryptionErrorType.CORRUPTED_DATA,
+        'Payload is not valid base64',
+      );
+    }
+
+    const combined = Buffer.from(payload, 'base64');
+    const minLength =
+      nacl.secretbox.nonceLength + nacl.secretbox.overheadLength;
+    if (combined.length < minLength) {
+      throw new DecryptionError(
+        DecryptionErrorType.CORRUPTED_DATA,
+        `Payload too short (${combined.length} < ${minLength} bytes)`,
+      );
+    }
+
+    const nonce = combined.subarray(0, nacl.secretbox.nonceLength);
+    const ciphertext = combined.subarray(nacl.secretbox.nonceLength);
+    const decrypted = nacl.secretbox.open(
+      new Uint8Array(ciphertext),
+      new Uint8Array(nonce),
+      this.encryptionKey,
+    );
+
+    if (!decrypted) {
+      // With a matching fingerprint the key is right, so a MAC failure means
+      // the data was modified. Legacy payloads carry no fingerprint, so a
+      // wrong key is indistinguishable from tampering — report INVALID_KEY,
+      // the more common and fixable cause.
+      throw fingerprint !== null
+        ? new DecryptionError(
+            DecryptionErrorType.TAMPERING,
+            'Authentication tag mismatch — ciphertext was modified',
+          )
+        : new DecryptionError(
+            DecryptionErrorType.INVALID_KEY,
+            'Authentication failed for legacy payload (wrong key or modified data)',
+          );
+    }
+
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(decrypted);
+    } catch {
+      throw new DecryptionError(
+        DecryptionErrorType.CORRUPTED_DATA,
+        'Decrypted payload is not valid UTF-8',
+      );
+      combined = Buffer.from(encryptedData, 'base64');
+    } catch {
+      this.recordDecryptionFailure('INVALID_FORMAT');
+      throw new DecryptionError('INVALID_FORMAT', { hint: 'base64 decode failed' });
+    }
+
+    if (combined.length <= nacl.secretbox.nonceLength) {
+      this.recordDecryptionFailure('INVALID_FORMAT');
+      throw new DecryptionError('INVALID_FORMAT', {
+        hint: `payload length ${combined.length} ≤ nonce length ${nacl.secretbox.nonceLength}`,
+      });
+    }
+
+    // ── 2. Extract nonce + ciphertext ──────────────────────────────────────
+    const nonce = new Uint8Array(combined.buffer, combined.byteOffset, nacl.secretbox.nonceLength);
+    const ciphertext = new Uint8Array(
+      combined.buffer,
+      combined.byteOffset + nacl.secretbox.nonceLength,
+      combined.length - nacl.secretbox.nonceLength,
+    );
+
+    // ── 3. Attempt authenticated decryption ────────────────────────────────
+    let decrypted: Uint8Array | null;
+    try {
+      decrypted = nacl.secretbox.open(ciphertext, nonce, this.encryptionKey);
+    } catch (err) {
+      // nacl itself threw — treat as corrupted
+      this.recordDecryptionFailure('CORRUPTED_DATA');
+      this.logger.error('nacl.secretbox.open threw unexpectedly', err);
+      throw new DecryptionError('CORRUPTED_DATA', { hint: 'nacl threw during open' });
+    }
+
+    if (decrypted === null) {
+      // NaCl Poly1305 MAC failure. Structurally valid payloads (correct length,
+      // proper nonce) that fail MAC are most likely tampered; undersized or
+      // truncated ciphertext sections indicate corruption.
+      const minCiphertextLen = nacl.secretbox.overheadLength; // 16-byte tag minimum
+      const reason: DecryptionFailureReason =
+        ciphertext.length >= minCiphertextLen ? 'TAMPERING' : 'CORRUPTED_DATA';
+
+      this.recordDecryptionFailure(reason);
+      this.logger.warn(
+        `Decryption MAC failure — classified as ${reason}. ` +
+          `ciphertextLen=${ciphertext.length}, minExpected=${minCiphertextLen}`,
+      );
+      throw new DecryptionError(reason);
+    }
+
+    return new TextDecoder().decode(decrypted);
   }
 
   /**
@@ -344,9 +555,7 @@ export class EncryptionService implements OnModuleInit {
   isConfigured(): boolean {
     const keyString =
       this.configService.get<StellarConfig>('stellar')?.encryptionKey;
-    return (
-      !!keyString && keyString !== DEFAULT_PLACEHOLDER
-    );
+    return !!keyString && keyString !== DEFAULT_PLACEHOLDER;
   }
 
   // ── Private helpers ────────────────────────────────────────────────────────
@@ -420,5 +629,11 @@ export class EncryptionService implements OnModuleInit {
     const encoder = new TextEncoder();
     const hash = nacl.hash(encoder.encode(keyString));
     return hash.slice(0, nacl.secretbox.keyLength);
+  }
+
+  /** Records a decryption failure metric and logs a warning. */
+  private recordDecryptionFailure(reason: DecryptionFailureReason): void {
+    this.metricsService?.recordDecryptionFailure(reason);
+    this.logger.warn(`Decryption failure: ${reason}`);
   }
 }

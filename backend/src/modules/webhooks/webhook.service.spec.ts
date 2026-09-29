@@ -10,6 +10,11 @@ import {
 import { WebhookSignatureGuard } from './guards/webhook-signature.guard';
 import { WEBHOOK_SECRET_METADATA_KEY } from './decorators/webhook-secret.decorator';
 import { MetricsService } from '../monitoring/metrics.service';
+import { SecurityEventsService } from '../security/security-events.service';
+import {
+  SecurityEventSeverity,
+  SecurityEventType,
+} from '../security/entities/security-event.entity';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -432,6 +437,47 @@ describe('WebhookSignatureService', () => {
 
       expect(recordWebhookSignatureVerification).toHaveBeenCalledWith(
         'signature_mismatch',
+      );
+    });
+
+    it('accepts a rotated secret supplied as a JSON array, newest first', () => {
+      const rotatedSecrets = JSON.stringify(['newer-secret', 'legacy-secret']);
+      const ts = buildTimestamp();
+      const sig = service.generateSignature(PAYLOAD, ts, 'legacy-secret');
+
+      expect(() =>
+        service.verifySignature(PAYLOAD, sig, ts, rotatedSecrets),
+      ).not.toThrow();
+    });
+
+    it('creates a security event when a signature is rejected', async () => {
+      const createEvent = jest.fn().mockResolvedValue({});
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          WebhookSignatureService,
+          {
+            provide: SecurityEventsService,
+            useValue: { createEvent },
+          },
+        ],
+      }).compile();
+      const svc = module.get<WebhookSignatureService>(WebhookSignatureService);
+
+      expect(() =>
+        svc.verifySignature(PAYLOAD, '0'.repeat(64), buildTimestamp(), SECRET),
+      ).toThrow('Invalid webhook signature');
+
+      expect(createEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: SecurityEventType.SUSPICIOUS_ACTIVITY,
+          severity: SecurityEventSeverity.HIGH,
+          success: false,
+          errorMessage: 'Rejected webhook with invalid signature',
+          details: expect.objectContaining({
+            reason: 'signature_mismatch',
+            event: 'webhook_signature_verification',
+          }),
+        }),
       );
     });
 

@@ -5,6 +5,7 @@
 
 import { syncOfflineData } from './sync-manager';
 import { setMetadata, getMetadata } from './db';
+import { Logger } from '../logger';
 
 declare global {
   interface Window {
@@ -112,7 +113,7 @@ export async function shouldSync(): Promise<boolean> {
 
 // ─── Fallback Periodic Sync ──────────────────────────────────────────────────
 
-let periodicSyncInterval: NodeJS.Timeout | null = null;
+let periodicSyncInterval: ReturnType<typeof setInterval> | null = null;
 
 /**
  * Setup periodic sync as fallback when Background Sync API is not available.
