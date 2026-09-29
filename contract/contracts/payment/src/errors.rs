@@ -65,6 +65,22 @@ pub enum PaymentError {
     ContractPaused = 39,
     /// Contract is not currently paused
     NotPaused = 40,
+    /// The configured `chioma` contract address has not been set (#1559).
+    /// `pay_rent` needs it to cross-check payment's local agreement record
+    /// against `chioma`'s authoritative one before moving funds.
+    ChiomaContractNotSet = 41,
+    /// The cross-contract call to `chioma` to fetch agreement data failed
+    /// outright (contract unavailable, reverted, or did not return
+    /// successfully), or `chioma` has no record of this agreement id at
+    /// all. Distinct from a successful lookup that returns mismatched data
+    /// (`AgreementDataMismatch`).
+    ChiomaAgreementLookupFailed = 42,
+    /// `payment`'s local agreement record for this id has drifted from
+    /// `chioma`'s authoritative one (different tenant/user, landlord/admin,
+    /// monthly rent, or active status) (#1559). Payment refuses to process
+    /// a payment against stale/inconsistent local data rather than silently
+    /// trusting whichever copy it happens to hold.
+    AgreementDataMismatch = 43,
 }
 
 /// Pins every `PaymentError` discriminant so off-chain code that maps error
@@ -107,5 +123,8 @@ mod pin_tests {
         assert_eq!(PaymentError::AdminAlreadySet as u32, 38);
         assert_eq!(PaymentError::ContractPaused as u32, 39);
         assert_eq!(PaymentError::NotPaused as u32, 40);
+        assert_eq!(PaymentError::ChiomaContractNotSet as u32, 41);
+        assert_eq!(PaymentError::ChiomaAgreementLookupFailed as u32, 42);
+        assert_eq!(PaymentError::AgreementDataMismatch as u32, 43);
     }
 }

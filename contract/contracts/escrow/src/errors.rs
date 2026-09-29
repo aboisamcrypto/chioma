@@ -50,14 +50,14 @@ pub enum EscrowError {
     EmptyFreezeReason = 21,
     /// System admin not set
     AdminNotSet = 22,
-    /// Agreement id must not be empty
-    EmptyAgreementId = 23,
-    /// Caller is not the configured dispute_resolution contract
-    NotDisputeResolutionContract = 24,
     /// Contract is globally paused; state-changing operations are blocked
     ContractPaused = 23,
     /// Contract is not currently paused
     NotPaused = 24,
+    /// Agreement id must not be empty
+    EmptyAgreementId = 25,
+    /// Caller is not the configured dispute_resolution contract
+    NotDisputeResolutionContract = 26,
 }
 
 /// Pins every `EscrowError` discriminant so off-chain code that maps error
@@ -94,5 +94,7 @@ mod pin_tests {
         assert_eq!(EscrowError::AdminNotSet as u32, 22);
         assert_eq!(EscrowError::ContractPaused as u32, 23);
         assert_eq!(EscrowError::NotPaused as u32, 24);
+        assert_eq!(EscrowError::EmptyAgreementId as u32, 25);
+        assert_eq!(EscrowError::NotDisputeResolutionContract as u32, 26);
     }
 }

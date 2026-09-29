@@ -33,6 +33,9 @@ mod tests_property;
 #[cfg(test)]
 mod tests_pause;
 
+#[cfg(test)]
+mod tests_chioma_integration;
+
 // Re-export public APIs
 pub use errors::PaymentError;
 pub use payment_impl::{calculate_payment_split, calculate_rent_for_period, create_payment_record};
@@ -216,6 +219,21 @@ impl PaymentContract {
         admin::get_admin(&env)
     }
 
+    /// Set the `chioma` contract address `pay_rent` cross-checks agreement
+    /// data against (#1559). Admin only.
+    pub fn set_chioma_contract(
+        env: Env,
+        caller: Address,
+        chioma_contract: Address,
+    ) -> Result<(), Error> {
+        admin::set_chioma_contract(env, caller, chioma_contract)
+    }
+
+    /// Get the configured `chioma` contract address, if any.
+    pub fn get_chioma_contract(env: Env) -> Option<Address> {
+        admin::get_chioma_contract(&env)
+    }
+
     /// Pause the contract, blocking all state-changing entry points (#1689).
     /// Reads remain available. Admin only.
     pub fn pause(env: Env, caller: Address) -> Result<(), Error> {
@@ -318,6 +336,21 @@ impl PaymentContract {
             .get(&StorageKey::Agreement(agreement_id.clone()))
             .ok_or(Error::AgreementNotFound)?;
 
+        // Cross-check payment's local agreement record against chioma's
+        // authoritative one before moving any funds (#1559). `chioma` must
+        // be configured via `set_chioma_contract` for `pay_rent` to be
+        // callable at all: payment used to keep this data as an entirely
+        // independent, never-reconciled copy, which is exactly the drift
+        // risk this closes.
+        let chioma_contract =
+            admin::get_chioma_contract(&env).ok_or(Error::ChiomaContractNotSet)?;
+        crate::payment_impl::verify_agreement_with_chioma(
+            &env,
+            &chioma_contract,
+            &agreement_id,
+            &agreement,
+        )?;
+
         // Validation
         if agreement.status != AgreementStatus::Active {
             return Err(Error::AgreementNotActive);
@@ -379,6 +412,23 @@ impl PaymentContract {
             .persistent()
             .set(&StorageKey::Agreement(agreement_id.clone()), &agreement);
 
+        // Running fee total (#1563): incremented as part of EFFECTS, before
+        // the token transfers below, so the on-chain accounting reflects
+        // "a fee was collected" atomically with the payment itself rather
+        // than only being reconstructable after the fact from event logs.
+        let total_fees_collected: i128 = env
+            .storage()
+            .instance()
+            .get(&StorageKey::TotalFeesCollected)
+            .unwrap_or(0i128)
+            + platform_amount;
+        env.storage()
+            .instance()
+            .set(&StorageKey::TotalFeesCollected, &total_fees_collected);
+        env.storage()
+            .instance()
+            .extend_ttl(crate::storage::TTL_THRESHOLD, crate::storage::TTL_BUMP);
+
         // Interactions: External calls AFTER state updates
         let token_client = token::Client::new(&env, &agreement.payment_token);
         token_client.transfer(&from, &agreement.landlord, &landlord_amount);
@@ -386,7 +436,7 @@ impl PaymentContract {
 
         events::rent_paid(
             &env,
-            agreement_id,
+            agreement_id.clone(),
             from,
             agreement.landlord.clone(),
             agreement.payment_token.clone(),
@@ -394,8 +444,18 @@ impl PaymentContract {
             landlord_amount,
             platform_amount,
         );
+        events::fees_accrued(&env, agreement_id, platform_amount, total_fees_collected);
 
         Ok(())
+    }
+
+    /// Total platform fees collected across all `pay_rent` calls (#1563),
+    /// queryable on-chain rather than only reconstructable from event logs.
+    pub fn get_total_fees_collected(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&StorageKey::TotalFeesCollected)
+            .unwrap_or(0i128)
     }
 
     /// Get payment details for a specific month

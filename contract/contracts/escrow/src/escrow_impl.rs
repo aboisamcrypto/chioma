@@ -958,6 +958,20 @@ impl EscrowContract {
         escrow.status = EscrowStatus::Released;
         EscrowStorage::save(&env, &escrow);
 
+        // Running governance fee total (#1563), updated as part of EFFECTS
+        // (before the token transfers below) so the on-chain accounting
+        // reflects "a fee was collected" atomically with the release.
+        let total_governance_fees: i128 = env
+            .storage()
+            .instance()
+            .get(&crate::types::DataKey::TotalGovernanceFeesCollected)
+            .unwrap_or(0i128)
+            + governance_share;
+        env.storage().instance().set(
+            &crate::types::DataKey::TotalGovernanceFeesCollected,
+            &total_governance_fees,
+        );
+
         // INTERACTIONS: distribute funds
         let token_client = token::Client::new(&env, &escrow.token);
         token_client.transfer(
@@ -978,12 +992,23 @@ impl EscrowContract {
 
         events::rent_released(
             &env,
-            escrow_id,
+            escrow_id.clone(),
             beneficiary_share,
             governance_share,
             agent_share,
         );
+        events::governance_fees_accrued(&env, escrow_id, governance_share, total_governance_fees);
         Ok(())
+    }
+
+    /// Total platform governance fees collected across all `release_rent`
+    /// calls (#1563), queryable on-chain rather than only reconstructable
+    /// from event logs.
+    pub fn get_total_governance_fees(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&crate::types::DataKey::TotalGovernanceFeesCollected)
+            .unwrap_or(0i128)
     }
 
     /// Withdraw safety deposit back to the depositor.

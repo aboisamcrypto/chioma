@@ -53,36 +53,40 @@ fn register_all(
 /// Scenario 1: an agreement created in `chioma`, then disputed via
 /// `dispute_resolution`.
 ///
-/// This is the *only* place in the entire workspace where one project
+/// This is one of the few places in the workspace where one project
 /// contract calls another on-chain: `dispute_resolution::raise_dispute`
 /// calls `chioma`'s agreement lookup via `env.invoke_contract` (see
 /// `dispute_resolution/src/dispute.rs`) to confirm the dispute raiser is
 /// actually a party to the agreement, rather than trusting the caller's
 /// own claim.
 ///
-/// Registering the real `chioma` contract here (not a mock) surfaces two
-/// pre-existing bugs that `dispute_resolution`'s own test suite never
-/// caught, because it only ever exercises this call against a
-/// hand-written `MockChiomaContract` whose function is deliberately named
-/// to match the (wrong) symbol the caller invokes:
+/// Registering the real `chioma` contract here (not a mock) used to surface
+/// two bugs that `dispute_resolution`'s own test suite never caught, because
+/// it only ever exercised this call against a hand-written
+/// `MockChiomaContract` whose function was deliberately named to match the
+/// (wrong) symbol the caller invoked (#1559):
 ///
-/// 1. `dispute.rs` invokes the symbol `"get_agr"` (via `symbol_short!`,
-///    which is capped at 9 characters and can't hold the real function
-///    name), but `chioma`'s actual exported function is `get_agreement`.
-///    Soroban resolves contract functions by their exact exported name, so
-///    this call never reaches `chioma::get_agreement` in production.
-/// 2. Even if the symbol were fixed, `dispute_resolution`'s local
+/// 1. `dispute.rs` used to invoke the symbol `"get_agr"` (via
+///    `symbol_short!`, which is capped at 9 characters and can't hold the
+///    real function name), but `chioma`'s actual exported function is
+///    `get_agreement`. Soroban resolves contract functions by their exact
+///    exported name, so that call never reached `chioma::get_agreement` in
+///    production. Fixed by calling `Symbol::new(&env, "get_agreement")`.
+/// 2. Even with the symbol fixed, `dispute_resolution`'s local
 ///    `RentAgreement` type (fields: `landlord`, `tenant`,
-///    `payment_history: Map<u32, PaymentSplit>`) does not structurally
-///    match `chioma`'s real `RentAgreement` (fields: `admin`, `user`,
+///    `payment_history: Map<u32, PaymentSplit>`) did not structurally match
+///    `chioma`'s real `RentAgreement` (fields: `admin`, `user`,
 ///    `witness_id`, `metadata_uri`, `attributes`) -- decoding one as the
-///    other would fail or silently misread fields.
+///    other would fail or silently misread fields. Fixed by introducing
+///    `dispute::ChiomaRentAgreement`, which mirrors chioma's real shape
+///    field-for-field, used only to decode this cross-contract response.
 ///
-/// This test documents the current (broken) behavior rather than papering
-/// over it: `raise_dispute` against a real, freshly-created, Active
-/// agreement in `chioma` does not succeed.
+/// This test now asserts the fixed behavior end-to-end against a real
+/// `chioma` instance (not a mock): `raise_dispute` against a real,
+/// freshly-created, Active agreement succeeds, and the resulting dispute is
+/// actually recorded.
 #[test]
-fn scenario_1_raise_dispute_against_real_chioma_agreement_is_currently_broken() {
+fn scenario_1_raise_dispute_against_real_chioma_agreement_succeeds() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -132,18 +136,21 @@ fn scenario_1_raise_dispute_against_real_chioma_agreement_is_currently_broken() 
     let details_hash = String::from_str(&env, "QmEvidence");
     let result = dispute.try_raise_dispute(&tenant, &agreement_id, &details_hash);
 
-    // See the module-level doc comment above: this currently fails against
-    // a real chioma contract because of the wrong invoke symbol and the
-    // mismatched RentAgreement shape, not because the scenario itself is
-    // invalid (the agreement genuinely is Active and `tenant` genuinely is
-    // a party to it).
-    assert!(
-        result.is_err(),
-        "raise_dispute unexpectedly succeeded against the real chioma contract -- \
-         if this now passes, the #1684-adjacent get_agr symbol/RentAgreement \
-         shape mismatch documented above has been fixed and this test (and its \
-         doc comment) should be updated to reflect the fix, not just relaxed."
+    // See the module-level doc comment above (#1559): raise_dispute now
+    // calls the real `get_agreement` export and decodes chioma's real
+    // `RentAgreement` shape, so this succeeds end-to-end against a real
+    // chioma instance, not just a hand-written mock.
+    assert_eq!(
+        result,
+        Ok(Ok(())),
+        "raise_dispute should succeed against a real, Active chioma agreement \
+         once the tenant/landlord raising it is genuinely a party to it"
     );
+
+    let recorded = dispute.get_dispute(&agreement_id).unwrap();
+    assert_eq!(recorded.agreement_id, agreement_id);
+    assert_eq!(recorded.details_hash, details_hash);
+    assert!(!recorded.resolved);
 }
 
 /// Scenario 2: property registration, agent verification, and an escrow
@@ -155,7 +162,7 @@ fn scenario_2_property_agent_and_escrow_lifecycle() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (property, agent, escrow, _dispute, _payment, _chioma) = register_all(&env);
+    let (property, agent, escrow, dispute, _payment, _chioma) = register_all(&env);
 
     let admin = Address::generate(&env);
     property.initialize(&admin);
@@ -189,6 +196,13 @@ fn scenario_2_property_agent_and_escrow_lifecycle() {
     let amount = 2_000i128;
     token_client.mint(&tenant, &amount);
 
+    // This scenario never disputes the escrow, but `create` still requires
+    // an agreement id and a dispute_resolution_contract address up front
+    // (#1685/#1687): pass the real, already-registered `dispute_resolution`
+    // contract from `register_all` rather than an arbitrary address, so the
+    // escrow instance this test drives is configured the way a real
+    // deployment would be.
+    let agreement_id = String::from_str(&env, "PROP-INTEGRATION-1-AGREEMENT");
     let escrow_id = escrow.create(
         &tenant,
         &landlord,
@@ -197,6 +211,8 @@ fn scenario_2_property_agent_and_escrow_lifecycle() {
         &realtor,
         &amount,
         &token.address(),
+        &agreement_id,
+        &dispute.address,
     );
     escrow.fund_escrow(&escrow_id, &tenant);
 
