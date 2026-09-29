@@ -24,6 +24,11 @@ import {
   BASE_FEE,
   Account,
 } from '@stellar/stellar-sdk';
+import {
+  waitForSorobanTransactionSuccess,
+  SorobanTransactionFailedError,
+  SorobanTransactionTimeoutError,
+} from '../../modules/stellar/services/soroban-transaction-poller';
 import { waitForSorobanTransactionSuccess } from '../../modules/stellar/services/soroban-transaction-poller';
 import {
   classifySorobanError,
@@ -51,6 +56,20 @@ const PROBE_MAX_DELAY_MS = 16_000;
 /** Backoff multiplier (exponential). */
 const PROBE_BACKOFF_MULTIPLIER = 2;
 
+// ── Transaction submission constants ─────────────────────────────────────────
+
+/** Number of submission attempts before giving up. */
+const TX_MAX_ATTEMPTS = 5;
+
+/** Initial backoff delay in ms for transaction retries. */
+const TX_INITIAL_BACKOFF_MS = 1_000;
+
+/** Backoff multiplier for transaction retries (exponential). */
+const TX_BACKOFF_MULTIPLIER = 2;
+
+/** Hard ceiling on any single transaction retry wait. */
+const TX_MAX_BACKOFF_MS = 30_000;
+
 // ── Connection status ─────────────────────────────────────────────────────────
 
 export type SorobanConnectionStatus =
@@ -72,6 +91,45 @@ export interface SorobanConnectionState {
   probeAttempts: number;
 }
 
+/**
+ * Classifies a Soroban submission/polling error as retriable (transient network
+ * issue) or permanent (validation / contract logic failure).
+ *
+ * Permanent errors should NOT be retried — they will always fail with the same
+ * inputs. Transient errors are worth retrying with backoff.
+ */
+export function isSorobanTransientError(error: unknown): boolean {
+  // Explicit permanent failure from the polling layer
+  if (error instanceof SorobanTransactionFailedError) return false;
+
+  if (error instanceof BadRequestException) {
+    const response = (error as BadRequestException).getResponse();
+    const message = JSON.stringify(response).toLowerCase();
+    // Validation / contract errors are permanent
+    if (
+      message.includes('invalid') ||
+      message.includes('validation') ||
+      message.includes('simulation failed')
+    ) {
+      return false;
+    }
+  }
+
+  if (error instanceof Error) {
+    const msg = error.message.toLowerCase();
+    // Permanent contract-level rejections
+    if (
+      msg.includes('failed to submit transaction') &&
+      msg.includes('invalid')
+    ) {
+      return false;
+    }
+  }
+
+  // Timeout, network, rate-limit errors are all transient
+  return true;
+}
+
 @Injectable()
 export class SorobanClientService implements OnModuleInit {
   private readonly logger = new Logger(SorobanClientService.name);
@@ -83,6 +141,7 @@ export class SorobanClientService implements OnModuleInit {
 
   private connectionState: SorobanConnectionState;
 
+  constructor(private configService: ConfigService) {
   /** Recent failed transactions, newest last (bounded in-memory DLQ). */
   private readonly deadLetters: SorobanDeadLetterEntry[] = [];
 
@@ -270,7 +329,7 @@ export class SorobanClientService implements OnModuleInit {
     return this.getConnectionStatus();
   }
 
-  // ── Public API ────────────────────────────────────────────────────────────
+  // ── Public API ─────────────────────────────────────────────────────────────
 
   getServer(): SorobanRpc.Server {
     return this.server;
@@ -299,6 +358,53 @@ export class SorobanClientService implements OnModuleInit {
   }
 
   async getAccount(publicKey: string): Promise<Account> {
+    return await this.server.getAccount(publicKey);
+  }
+
+  getContract(): Contract {
+    this.ensureContractId();
+    return new Contract(this.contractId);
+  }
+
+  createTransactionBuilder(account: Account): TransactionBuilder {
+    return new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.networkPassphrase,
+    });
+  }
+
+  async simulateTransaction(
+    transaction: ReturnType<TransactionBuilder['build']>,
+  ): Promise<SorobanRpc.Api.SimulateTransactionResponse> {
+    return await this.server.simulateTransaction(transaction);
+  }
+
+  ensureContractId(): void {
+    if (!this.contractId) {
+      throw new BadRequestException(
+        'On-chain features are not configured. CHIOMA_CONTRACT_ID is not set.',
+      );
+    }
+  }
+
+  verifyStellarAddress(address: string): boolean {
+    if (!address) return false;
+    return /^G[A-Z2-7]{55}$/.test(address);
+  }
+
+  /**
+   * Submits a transaction to Soroban with exponential backoff retry.
+   *
+   * - Simulates first to catch permanent validation errors early (no retry).
+   * - Distinguishes transient (network/timeout) from permanent (validation)
+   *   errors via `isSorobanTransientError`.
+   * - Polls for transaction confirmation after submission using
+   *   `waitForSorobanTransactionSuccess`.
+   * - Throws immediately on permanent errors to avoid wasting retry budget.
+   *
+   * @param transaction - Built (but unsigned) transaction
+   * @param signerKeypair - Keypair to sign with
+   * @returns Confirmed transaction hash
     return this.server.getAccount(publicKey);
   }
 
@@ -326,6 +432,24 @@ export class SorobanClientService implements OnModuleInit {
   async submitTransaction(
     transaction: ReturnType<TransactionBuilder['build']>,
     signerKeypair: Keypair,
+  ): Promise<string> {
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= TX_MAX_ATTEMPTS; attempt++) {
+      try {
+        // Simulate first — catches contract/validation failures before sending
+        const simulateResponse =
+          await this.server.simulateTransaction(transaction);
+
+        if (SorobanRpc.Api.isSimulationError(simulateResponse)) {
+          // Simulation errors are always permanent — bail immediately
+          throw new BadRequestException(
+            `Transaction simulation failed: ${simulateResponse.error}`,
+          );
+        }
+
+        if (!SorobanRpc.Api.isSimulationSuccess(simulateResponse)) {
+          throw new BadRequestException('Transaction simulation did not succeed');
     operation = 'soroban_tx',
   ): Promise<string> {
     const maxAttempts = this.getMaxRetries();
@@ -355,6 +479,20 @@ export class SorobanClientService implements OnModuleInit {
         preparedTx.sign(signerKeypair);
 
         const sendResponse = await this.server.sendTransaction(preparedTx);
+
+        if (sendResponse.status === 'ERROR') {
+          throw new BadRequestException(
+            `Failed to submit transaction: ${JSON.stringify(sendResponse.errorResult)}`,
+          );
+        }
+
+        const txHash = sendResponse.hash;
+
+        this.logger.log(
+          `[attempt ${attempt}/${TX_MAX_ATTEMPTS}] Transaction submitted: ${txHash}`,
+        );
+
+        // Poll for confirmation with its own exponential backoff
         txHash = sendResponse.hash;
         if (sendResponse.status === 'ERROR') {
           const detail = JSON.stringify(sendResponse.errorResult ?? '');
@@ -377,6 +515,64 @@ export class SorobanClientService implements OnModuleInit {
           txHash,
           this.configService,
         );
+
+        this.logger.log(`Transaction confirmed: ${txHash}`);
+        return txHash;
+      } catch (error) {
+        lastError = error;
+
+        // SorobanTransactionFailedError = on-chain execution failure — permanent
+        if (error instanceof SorobanTransactionFailedError) {
+          this.logger.error(
+            `Transaction permanently failed on-chain (hash: ${error.hash}, status: ${error.finalStatus ?? 'unknown'})`,
+            error.stack,
+          );
+          throw new BadRequestException(
+            `Transaction failed on-chain: ${error.hash}`,
+          );
+        }
+
+        // SorobanTransactionTimeoutError = polling timed out — transient, retry
+        if (error instanceof SorobanTransactionTimeoutError) {
+          this.logger.warn(
+            `Transaction polling timed out after ${error.attempts} attempts (hash: ${error.hash}). ` +
+              `Submission attempt ${attempt}/${TX_MAX_ATTEMPTS}.`,
+          );
+          // Fall through to retry logic below
+        } else if (!isSorobanTransientError(error)) {
+          // Permanent error (validation, contract rejection) — do not retry
+          this.logger.error(
+            `Permanent Soroban error on attempt ${attempt}/${TX_MAX_ATTEMPTS}: ` +
+              (error instanceof Error ? error.message : String(error)),
+          );
+          throw error;
+        } else {
+          this.logger.warn(
+            `Transient Soroban error on attempt ${attempt}/${TX_MAX_ATTEMPTS}: ` +
+              (error instanceof Error ? error.message : String(error)),
+          );
+        }
+
+        if (attempt < TX_MAX_ATTEMPTS) {
+          const delayMs = Math.min(
+            TX_INITIAL_BACKOFF_MS * Math.pow(TX_BACKOFF_MULTIPLIER, attempt - 1),
+            TX_MAX_BACKOFF_MS,
+          );
+          this.logger.warn(
+            `Retrying in ${delayMs}ms (attempt ${attempt + 1}/${TX_MAX_ATTEMPTS})…`,
+          );
+          await this.sleep(delayMs);
+        }
+      }
+    }
+
+    this.logger.error(
+      `Soroban transaction failed after ${TX_MAX_ATTEMPTS} attempts.`,
+      lastError instanceof Error ? lastError.stack : String(lastError),
+    );
+    throw new BadRequestException(
+      `Soroban transaction failed after ${TX_MAX_ATTEMPTS} attempts`,
+    );
         this.logger.log(
           `[${operation}] Transaction successful: ${txHash} (attempt ${attempt}/${maxAttempts})`,
         );
@@ -474,10 +670,7 @@ export class SorobanClientService implements OnModuleInit {
   }
 
   private getNetworkPassphrase(): string {
-    const network = this.configService.get<string>(
-      'STELLAR_NETWORK',
-      'testnet',
-    );
+    const network = this.configService.get<string>('STELLAR_NETWORK', 'testnet');
     return network === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
   }
 
