@@ -117,7 +117,7 @@ export class WebhookSignatureService {
     payload: string,
     signature: string | undefined,
     timestamp: string | undefined,
-    secret: string | undefined,
+    secret: string | readonly string[] | undefined,
     toleranceMs: number = DEFAULT_TOLERANCE_MS,
     context: WebhookVerificationContext = {},
   ): void {
@@ -136,6 +136,9 @@ export class WebhookSignatureService {
       throw new UnauthorizedException('Missing webhook signature');
     }
 
+    const secrets = (Array.isArray(secret) ? secret : [secret]).filter(
+      (value): value is string => Boolean(value),
+    );
     const secrets = this.resolveSecrets(secret);
     if (secrets.length === 0) {
       this.logRejection(
@@ -176,12 +179,26 @@ export class WebhookSignatureService {
       throw new UnauthorizedException('Webhook timestamp expired');
     }
 
+    const signatureBuffer = Buffer.from(signature, 'hex');
+    let expectedSignature = '';
+    let matched = false;
+    for (const candidateSecret of secrets) {
+      const candidateSignature = this.generateSignature(
     const matchingSecret = secrets.find((candidateSecret) => {
       const expectedSignature = this.generateSignature(
         payload,
         timestamp,
         candidateSecret,
       );
+      const expectedBuffer = Buffer.from(candidateSignature, 'hex');
+      const candidateMatched =
+        signatureBuffer.length === expectedBuffer.length &&
+        crypto.timingSafeEqual(signatureBuffer, expectedBuffer);
+      matched = candidateMatched || matched;
+      if (!expectedSignature) expectedSignature = candidateSignature;
+    }
+
+    if (!matched) {
       const signatureBuffer = Buffer.from(signature, 'hex');
       const expectedBuffer = Buffer.from(expectedSignature, 'hex');
 

@@ -26,6 +26,7 @@ const requiredDeployedExtras = {
   AWS_REGION: 'us-east-1',
   AWS_S3_BUCKET: 'chioma-bucket',
   PAYMENT_WEBHOOK_SECRET: 'payment-webhook-secret-value',
+  PAYMENT_WEBHOOK_SECRET_PREVIOUS: 'previous-payment-webhook-secret-value',
   WEBHOOK_SIGNATURE_SECRET: 'webhook-signature-secret-value',
   EMAIL_USER: 'noreply@chioma.app',
   EMAIL_PASSWORD: 'email-password-value',
