@@ -3,6 +3,10 @@ import { ConfigService } from '@nestjs/config';
 import { HttpStatus } from '@nestjs/common';
 import * as nacl from 'tweetnacl';
 import { StellarConfig } from '../config/stellar.config';
+import { ConfigurationError } from '../../../common/errors';
+import { DecryptionError, DecryptionErrorType } from './decryption.error';
+
+export { DecryptionError, DecryptionErrorType } from './decryption.error';
 import { ConfigurationError, BaseAppError, ErrorCode } from '../../../common/errors';
 import { MetricsService } from '../../monitoring/metrics.service';
 
@@ -42,10 +46,28 @@ const MIN_KEY_LENGTH = 32;
 /** Sentinel value shipped in `stellar.config.ts` as the default. */
 const DEFAULT_PLACEHOLDER = 'default-encryption-key-change-in-production';
 
+/**
+ * Versioned envelope: `v1.<keyFingerprint>.<base64(nonce + ciphertext)>`.
+ * The fingerprint (first 4 bytes of SHA-512 of the derived key, hex) lets
+ * decryption tell a wrong key apart from tampered data. Unprefixed legacy
+ * payloads (plain base64) are still accepted.
+ */
+const ENVELOPE_VERSION = 'v1';
+const FINGERPRINT_BYTES = 4;
+const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
+
 @Injectable()
 export class EncryptionService implements OnModuleInit {
   private readonly logger = new Logger(EncryptionService.name);
   private readonly encryptionKey: Uint8Array;
+  private readonly keyFingerprint: string;
+
+  /** Decryption failure counters by type, for metrics/health reporting. */
+  private readonly decryptionFailures: Record<DecryptionErrorType, number> = {
+    [DecryptionErrorType.INVALID_KEY]: 0,
+    [DecryptionErrorType.CORRUPTED_DATA]: 0,
+    [DecryptionErrorType.TAMPERING]: 0,
+  };
 
   /**
    * True when the key passed all validation checks at construction time.
@@ -73,6 +95,9 @@ export class EncryptionService implements OnModuleInit {
     // Always derive the key so the rest of the class stays consistent; runtime
     // operations throw immediately if keyValid is false.
     this.encryptionKey = this.deriveKey(keyString);
+    this.keyFingerprint = Buffer.from(
+      nacl.hash(this.encryptionKey).slice(0, FINGERPRINT_BYTES),
+    ).toString('hex');
 
     if (!valid) {
       this.logger.error(
@@ -174,8 +199,9 @@ export class EncryptionService implements OnModuleInit {
       combined.set(nonce);
       combined.set(ciphertext, nonce.length);
 
-      // Return as base64
-      return Buffer.from(combined).toString('base64');
+      return `${ENVELOPE_VERSION}.${this.keyFingerprint}.${Buffer.from(
+        combined,
+      ).toString('base64')}`;
     } catch (error) {
       this.logger.error('Encryption failed', error);
       throw new Error('Failed to encrypt secret key');
@@ -184,8 +210,9 @@ export class EncryptionService implements OnModuleInit {
 
   /**
    * Decrypts an encrypted secret key.
-   * @param encryptedData - Base64 encoded encrypted data (nonce + ciphertext)
+   * @param encryptedData - `v1.<fingerprint>.<base64>` envelope or legacy base64
    * @returns Decrypted secret key
+   * @throws DecryptionError with type INVALID_KEY, CORRUPTED_DATA or TAMPERING
    * @throws {DecryptionError} with a discriminated `reason` field
    */
   decrypt(encryptedData: string): string {
@@ -194,6 +221,104 @@ export class EncryptionService implements OnModuleInit {
     // ── 1. Parse & structural validation ──────────────────────────────────
     let combined: Buffer;
     try {
+      return this.decryptOrThrow(encryptedData);
+    } catch (error) {
+      const failure =
+        error instanceof DecryptionError
+          ? error
+          : new DecryptionError(
+              DecryptionErrorType.CORRUPTED_DATA,
+              `Unexpected decryption failure: ${(error as Error)?.message}`,
+            );
+      this.decryptionFailures[failure.type]++;
+      this.logger.error(
+        `Decryption failed [${failure.type}]: ${failure.message}`,
+      );
+      throw failure;
+    }
+  }
+
+  /** Snapshot of decryption failure counts by type (no key material). */
+  getDecryptionFailureMetrics(): Record<DecryptionErrorType, number> {
+    return { ...this.decryptionFailures };
+  }
+
+  private decryptOrThrow(encryptedData: string): string {
+    if (typeof encryptedData !== 'string' || encryptedData.length === 0) {
+      throw new DecryptionError(
+        DecryptionErrorType.CORRUPTED_DATA,
+        'Encrypted payload is empty',
+      );
+    }
+
+    let payload = encryptedData;
+    let fingerprint: string | null = null;
+    if (encryptedData.startsWith(`${ENVELOPE_VERSION}.`)) {
+      const parts = encryptedData.split('.');
+      if (parts.length !== 3) {
+        throw new DecryptionError(
+          DecryptionErrorType.CORRUPTED_DATA,
+          'Malformed encryption envelope',
+        );
+      }
+      [, fingerprint, payload] = parts;
+    }
+
+    if (fingerprint !== null && fingerprint !== this.keyFingerprint) {
+      throw new DecryptionError(
+        DecryptionErrorType.INVALID_KEY,
+        'Payload was encrypted with a different key (fingerprint mismatch)',
+      );
+    }
+
+    if (!BASE64_PATTERN.test(payload)) {
+      throw new DecryptionError(
+        DecryptionErrorType.CORRUPTED_DATA,
+        'Payload is not valid base64',
+      );
+    }
+
+    const combined = Buffer.from(payload, 'base64');
+    const minLength =
+      nacl.secretbox.nonceLength + nacl.secretbox.overheadLength;
+    if (combined.length < minLength) {
+      throw new DecryptionError(
+        DecryptionErrorType.CORRUPTED_DATA,
+        `Payload too short (${combined.length} < ${minLength} bytes)`,
+      );
+    }
+
+    const nonce = combined.subarray(0, nacl.secretbox.nonceLength);
+    const ciphertext = combined.subarray(nacl.secretbox.nonceLength);
+    const decrypted = nacl.secretbox.open(
+      new Uint8Array(ciphertext),
+      new Uint8Array(nonce),
+      this.encryptionKey,
+    );
+
+    if (!decrypted) {
+      // With a matching fingerprint the key is right, so a MAC failure means
+      // the data was modified. Legacy payloads carry no fingerprint, so a
+      // wrong key is indistinguishable from tampering — report INVALID_KEY,
+      // the more common and fixable cause.
+      throw fingerprint !== null
+        ? new DecryptionError(
+            DecryptionErrorType.TAMPERING,
+            'Authentication tag mismatch — ciphertext was modified',
+          )
+        : new DecryptionError(
+            DecryptionErrorType.INVALID_KEY,
+            'Authentication failed for legacy payload (wrong key or modified data)',
+          );
+    }
+
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(decrypted);
+    } catch {
+      throw new DecryptionError(
+        DecryptionErrorType.CORRUPTED_DATA,
+        'Decrypted payload is not valid UTF-8',
+      );
       combined = Buffer.from(encryptedData, 'base64');
     } catch {
       this.recordDecryptionFailure('INVALID_FORMAT');
@@ -264,9 +389,7 @@ export class EncryptionService implements OnModuleInit {
   isConfigured(): boolean {
     const keyString =
       this.configService.get<StellarConfig>('stellar')?.encryptionKey;
-    return (
-      !!keyString && keyString !== DEFAULT_PLACEHOLDER
-    );
+    return !!keyString && keyString !== DEFAULT_PLACEHOLDER;
   }
 
   // ── Private helpers ────────────────────────────────────────────────────────

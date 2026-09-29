@@ -1,5 +1,10 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
+import {
+  DecryptionError,
+  DecryptionErrorType,
+  EncryptionService,
+} from '../services/encryption.service';
 import { EncryptionService, DecryptionError } from '../services/encryption.service';
 
 const VALID_KEY = 'test-encryption-key-for-testing-purposes-long-enough';
@@ -50,6 +55,46 @@ describe('EncryptionService', () => {
       expect(service.decrypt(service.encrypt(s))).toBe(s);
     });
 
+    const decryptError = (data: string): DecryptionError => {
+      try {
+        service.decrypt(data);
+      } catch (e) {
+        return e as DecryptionError;
+      }
+      throw new Error('expected decrypt to throw');
+    };
+
+    it('reports CORRUPTED_DATA for malformed or truncated payloads', () => {
+      expect(decryptError('not base64!').type).toBe(
+        DecryptionErrorType.CORRUPTED_DATA,
+      );
+      expect(decryptError('AAAA').type).toBe(
+        DecryptionErrorType.CORRUPTED_DATA,
+      );
+    });
+
+    it('reports INVALID_KEY when the key fingerprint does not match', () => {
+      const [v, , payload] = service.encrypt('secret').split('.');
+      const err = decryptError(`${v}.deadbeef.${payload}`);
+      expect(err).toBeInstanceOf(DecryptionError);
+      expect(err.type).toBe(DecryptionErrorType.INVALID_KEY);
+    });
+
+    it('reports TAMPERING when ciphertext is modified', () => {
+      const [v, fp, payload] = service.encrypt('secret').split('.');
+      const bytes = Buffer.from(payload, 'base64');
+      bytes[bytes.length - 1] ^= 0xff;
+      const err = decryptError(`${v}.${fp}.${bytes.toString('base64')}`);
+      expect(err.type).toBe(DecryptionErrorType.TAMPERING);
+      expect(
+        service.getDecryptionFailureMetrics()[DecryptionErrorType.TAMPERING],
+      ).toBe(1);
+    });
+
+    it('should handle empty strings', () => {
+      const encrypted = service.encrypt('');
+      const decrypted = service.decrypt(encrypted);
+      expect(decrypted).toBe('');
     it('handles unicode characters', () => {
       expect(service.decrypt(service.encrypt('秘密🔐'))).toBe('秘密🔐');
     });
